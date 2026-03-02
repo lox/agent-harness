@@ -25,6 +25,7 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - Core harness loop, hooks, and thread state are implemented
 - Unit tests are in place for core loop behaviour and pause/resume
 - OpenAI provider adapter is implemented (`provider/openai`)
+- Anthropic provider adapter is implemented (`provider/anthropic`)
 - `examples/claw` provides a REPL harness for manual testing
 
 ## What it doesn't do
@@ -51,10 +52,10 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - [x] Add lifecycle hooks and event emission
 - [x] Stabilise core loop semantics with unit tests
 - [x] Add a runnable REPL example under `examples/claw`
-- [ ] Add CI for `go test`, `go test -race`, and `go vet`
+- [x] Add CI for `go test`, `go test -race`, and `go vet`
 - [x] Implement `provider/openai` adapter (non-streaming + streaming)
-- [ ] Implement `provider/anthropic` adapter (non-streaming + streaming)
-- [ ] Add provider integration tests using local HTTP test servers
+- [x] Implement `provider/anthropic` adapter (non-streaming + streaming)
+- [x] Add provider integration tests using local HTTP test servers
 - [ ] Cut `v0.1.0` once adapters + example + CI are complete
 
 ## Documentation

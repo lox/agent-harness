@@ -31,7 +31,7 @@ provider/
 Current status:
 
 - `provider/openai`: implemented
-- `provider/anthropic`: planned
+- `provider/anthropic`: implemented
 
 ## OpenAI Adapter
 
@@ -59,13 +59,14 @@ Unknown option keys should be ignored safely (without failing the run).
 
 Target SDK: `github.com/anthropics/anthropic-sdk-go`
 
-Status: planned.
+Status: implemented with non-streaming and streaming support.
 
 Constructor options:
 
 - `WithAPIKey(key string)`
+- `WithBaseURL(url string)`
 - `WithDefaultModel(model string)`
-- `WithPromptCaching(enabled bool)`
+- `WithRequestOption(opt)`
 
 `ChatParams.Options` mappings:
 
@@ -79,8 +80,7 @@ Adapter-specific mapping considerations:
 
 - System prompt is a top-level request field, not a normal message.
 - Tool result responses are represented as user-role tool-result blocks by the SDK.
-- Thinking blocks may require signature round-tripping between turns.
-- Prompt caching can be adapter-managed without harness API changes.
+- Thinking content is mapped to `Message.Thinking` when present.
 
 ## Testing Approach
 
