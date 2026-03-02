@@ -20,6 +20,12 @@ result, err := harness.Run(ctx, provider,
 
 Implements the core agent loop: call the LLM → execute tool calls → feed results back → repeat. Everything else (storage, prompts, routing) is your problem.
 
+## Status
+
+- Core harness loop, hooks, and thread state are implemented
+- Unit tests are in place for core loop behaviour and pause/resume
+- Provider adapters are planned next (OpenAI first, then Anthropic)
+
 ## What it doesn't do
 
 - Bundle LLM provider clients — you implement a single `Chat()` method
@@ -36,6 +42,27 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - Progressive disclosure via `WithToolFilter`
 - Pause/resume with explicit `PendingToolCalls` for approval workflows
 - Composes naturally with [ACP](https://agentclientprotocol.com/) and [MCP](https://modelcontextprotocol.io/)
+
+## Roadmap
+
+- [x] Extract the reusable harness core (`Run`, messages, tools, provider interface)
+- [x] Add pause/resume support (`StopPaused`, `PendingToolCalls`, `Thread.ResolvePending`)
+- [x] Add lifecycle hooks and event emission
+- [x] Stabilise core loop semantics with unit tests
+- [ ] Add a runnable example under `examples/basic`
+- [ ] Add CI for `go test`, `go test -race`, and `go vet`
+- [ ] Implement `provider/openai` adapter (non-streaming + streaming)
+- [ ] Implement `provider/anthropic` adapter (non-streaming + streaming)
+- [ ] Add provider integration tests using local HTTP test servers
+- [ ] Cut `v0.1.0` once adapters + example + CI are complete
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md) — API shape, loop lifecycle, and state model
+- [docs/runner.md](docs/runner.md) — optional helper for starting/stopping active runs
+- [docs/providers.md](docs/providers.md) — provider adapter contracts and type mappings
+- [docs/research.md](docs/research.md) — research notes and design rationale
+- [PLAN.md](PLAN.md) — original long-form planning document
 
 ## Pause And Resume
 
@@ -90,4 +117,34 @@ result, err := harness.Run(ctx, provider,
 )
 ```
 
-See [PLAN.md](PLAN.md) for the full design, API types, pseudocode, and research notes.
+## Cancelling Active Runs
+
+Use `runner.Runner` when you want to interrupt an in-flight run from external control input such as a user saying "stop".
+
+```go
+r := runner.New()
+
+done, err := r.Start(context.Background(), thread.ID, func(ctx context.Context) error {
+    result, err := harness.Run(ctx, provider,
+        harness.WithMessages(thread.Messages...),
+        harness.WithTools(tools...),
+    )
+    if err == nil {
+        thread.Append(result)
+    }
+    return err
+})
+if err != nil {
+    return err
+}
+
+// elsewhere: control-plane stop command
+if strings.EqualFold(strings.TrimSpace(userInput), "stop") {
+    r.Stop(thread.ID)
+}
+
+runErr := <-done
+_ = runErr
+```
+
+See [docs/architecture.md](docs/architecture.md) for the primary implementation guide.
