@@ -20,7 +20,7 @@ All adapters should follow the same flow:
 4. Streaming path emits `Delta` chunks via `ChatParams.OnDelta` and accumulates to one final message.
 5. Response conversion maps usage and tool calls back to harness types.
 
-## Planned Packages
+## Provider Packages
 
 ```
 provider/
@@ -44,6 +44,7 @@ Constructor options:
 - `WithAPIKey(key string)`
 - `WithBaseURL(url string)`
 - `WithDefaultModel(model string)`
+- `WithRequestOption(opt)`
 
 `ChatParams.Options` mappings:
 

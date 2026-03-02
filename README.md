@@ -31,7 +31,7 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 
 ## What it doesn't do
 
-- Bundle LLM provider clients — you implement a single `Chat()` method
+- Force a specific LLM provider — use built-in adapters or implement your own `Chat()` provider
 - Manage conversation storage — you serialise the `Thread` type however you want
 - Construct system prompts — you pass a string
 - Orchestrate multi-agent workflows — call `Run()` from a tool for sub-agents
