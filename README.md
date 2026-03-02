@@ -22,6 +22,7 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 
 ## Status
 
+- `v0.1.0` released: https://github.com/lox/agent-harness/releases/tag/v0.1.0
 - Core harness loop, hooks, and thread state are implemented
 - Unit tests are in place for core loop behaviour and pause/resume
 - OpenAI provider adapter is implemented (`provider/openai`)
@@ -56,7 +57,7 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - [x] Implement `provider/openai` adapter (non-streaming + streaming)
 - [x] Implement `provider/anthropic` adapter (non-streaming + streaming)
 - [x] Add provider integration tests using local HTTP test servers
-- [ ] Cut `v0.1.0` once adapters + example + CI are complete
+- [x] Cut `v0.1.0` once adapters + example + CI are complete
 
 ## Documentation
 
