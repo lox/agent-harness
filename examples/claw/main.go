@@ -17,137 +17,202 @@ import (
 	"github.com/lox/agent-harness/runner"
 )
 
+const (
+	prompt = "claw> "
+)
+
+type app struct {
+	provider harness.Provider
+	runner   *runner.Runner
+	thread   *harness.Thread
+	tools    []harness.Tool
+
+	system   string
+	model    string
+	maxSteps int
+
+	mu sync.Mutex
+}
+
 func main() {
 	modelFlag := flag.String("model", envOrDefault("OPENAI_MODEL", "gpt-4o-mini"), "model name")
 	systemFlag := flag.String("system", "You are Claw, a concise command-line coding assistant.", "system prompt")
 	maxStepsFlag := flag.Int("max-steps", 8, "max tool loop steps per turn")
 	flag.Parse()
 
-	provider := openai.New(openai.WithDefaultModel(*modelFlag))
-	r := runner.New()
-	thread := harness.NewThread()
-	tools := builtInTools()
+	a := &app{
+		provider: openai.New(openai.WithDefaultModel(*modelFlag)),
+		runner:   runner.New(),
+		thread:   harness.NewThread(),
+		tools:    builtInTools(),
+		system:   *systemFlag,
+		model:    *modelFlag,
+		maxSteps: *maxStepsFlag,
+	}
+	a.run()
+}
 
-	var mu sync.Mutex
-
+func (a *app) run() {
 	fmt.Println("claw repl")
 	fmt.Println("commands: /help, /stop, /history, /tools, /quit")
 
-	input := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Print("claw> ")
-		if !input.Scan() {
+		fmt.Print(prompt)
+		if !scanner.Scan() {
 			fmt.Println()
 			break
 		}
 
-		line := strings.TrimSpace(input.Text())
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
 
-		switch line {
-		case "/help":
-			fmt.Println("/help       show commands")
-			fmt.Println("/stop       cancel active run")
-			fmt.Println("/history    print thread messages")
-			fmt.Println("/tools      list available tools")
-			fmt.Println("/quit       exit")
-			continue
-		case "/tools":
-			for _, tool := range tools {
-				fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
-			}
-			continue
-		case "/history":
-			mu.Lock()
-			for i, msg := range thread.Messages {
-				fmt.Printf("%d. %s", i+1, msg.Role)
-				if msg.Content != "" {
-					fmt.Printf(": %s", msg.Content)
-				}
-				if msg.ToolResult != nil {
-					fmt.Printf(": %s", msg.ToolResult.Content)
-				}
-				fmt.Println()
-			}
-			mu.Unlock()
-			continue
-		case "/stop":
-			if r.Stop(thread.ID) {
-				fmt.Println("active run cancelled")
-			} else {
-				fmt.Println("no active run")
-			}
-			continue
-		case "/quit":
-			r.Stop(thread.ID)
+		handled, quit := a.handleCommand(line)
+		if quit {
 			return
 		}
-
-		if r.IsRunning(thread.ID) {
-			fmt.Println("run already active; use /stop first")
+		if handled {
 			continue
 		}
 
-		mu.Lock()
-		thread.AddUser(line)
-		messages := append([]harness.Message(nil), thread.Messages...)
-		mu.Unlock()
-
-		done, err := r.Start(context.Background(), thread.ID, func(ctx context.Context) error {
-			result, err := harness.Run(ctx, provider,
-				harness.WithSystem(*systemFlag),
-				harness.WithMessages(messages...),
-				harness.WithTools(tools...),
-				harness.WithModel(*modelFlag),
-				harness.WithMaxSteps(*maxStepsFlag),
-			)
-			if err != nil {
-				return err
-			}
-
-			mu.Lock()
-			thread.Append(result)
-			mu.Unlock()
-
-			for _, msg := range result.Messages {
-				switch msg.Role {
-				case harness.RoleAssistant:
-					if msg.Content != "" {
-						fmt.Printf("assistant> %s\n", msg.Content)
-					}
-				case harness.RoleTool:
-					if msg.ToolResult != nil && msg.ToolResult.UserContent != "" {
-						fmt.Printf("tool[%s]> %s\n", msg.ToolResult.ToolCallID, msg.ToolResult.UserContent)
-					}
-				}
-			}
-
-			if result.StopReason == harness.StopMaxSteps {
-				fmt.Println("assistant> stopped due to max steps")
-			}
-			return nil
-		})
-		if err != nil {
-			fmt.Printf("error: %v\n", err)
-			continue
-		}
-
-		go func() {
-			err := <-done
-			switch {
-			case err == nil:
-			case errors.Is(err, context.Canceled):
-				fmt.Println("assistant> cancelled")
-			default:
-				fmt.Printf("assistant error: %v\n", err)
-			}
-		}()
+		a.handlePrompt(line)
 	}
 
-	if err := input.Err(); err != nil {
+	if err := scanner.Err(); err != nil {
 		fmt.Fprintf(os.Stderr, "read error: %v\n", err)
+	}
+}
+
+func (a *app) handleCommand(line string) (handled bool, quit bool) {
+	switch line {
+	case "/help":
+		fmt.Println("/help       show commands")
+		fmt.Println("/stop       cancel active run")
+		fmt.Println("/history    print thread messages")
+		fmt.Println("/tools      list available tools")
+		fmt.Println("/quit       exit")
+		return true, false
+	case "/tools":
+		for _, tool := range a.tools {
+			fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
+		}
+		return true, false
+	case "/history":
+		a.printHistory()
+		return true, false
+	case "/stop":
+		if a.runner.Stop(a.thread.ID) {
+			fmt.Println("assistant │ cancelled active run")
+		} else {
+			fmt.Println("assistant │ no active run")
+		}
+		return true, false
+	case "/quit":
+		a.runner.Stop(a.thread.ID)
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func (a *app) handlePrompt(text string) {
+	if a.runner.IsRunning(a.thread.ID) {
+		fmt.Println("assistant │ run already active; use /stop first")
+		return
+	}
+
+	a.mu.Lock()
+	a.thread.AddUser(text)
+	messages := append([]harness.Message(nil), a.thread.Messages...)
+	a.mu.Unlock()
+
+	done, err := a.runner.Start(context.Background(), a.thread.ID, func(ctx context.Context) error {
+		result, err := harness.Run(ctx, a.provider,
+			harness.WithSystem(a.system),
+			harness.WithMessages(messages...),
+			harness.WithTools(a.tools...),
+			harness.WithModel(a.model),
+			harness.WithMaxSteps(a.maxSteps),
+		)
+		if err != nil {
+			return err
+		}
+
+		a.mu.Lock()
+		a.thread.Append(result)
+		a.mu.Unlock()
+
+		a.printResult(result)
+		return nil
+	})
+	if err != nil {
+		fmt.Printf("assistant │ error: %v\n", err)
+		return
+	}
+
+	go func() {
+		err := <-done
+		switch {
+		case err == nil:
+		case errors.Is(err, context.Canceled):
+			fmt.Println("assistant │ cancelled")
+		default:
+			fmt.Printf("assistant │ error: %v\n", err)
+		}
+	}()
+}
+
+func (a *app) printHistory() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if len(a.thread.Messages) == 0 {
+		fmt.Println("history │ empty")
+		return
+	}
+
+	for i, msg := range a.thread.Messages {
+		content := strings.TrimSpace(msg.Content)
+		if msg.ToolResult != nil {
+			content = strings.TrimSpace(msg.ToolResult.Content)
+		}
+		fmt.Printf("%02d │ %-9s │ %s\n", i+1, msg.Role, content)
+	}
+}
+
+func (a *app) printResult(result *harness.Result) {
+	var lastToolOutput string
+
+	for _, msg := range result.Messages {
+		switch msg.Role {
+		case harness.RoleTool:
+			if msg.ToolResult == nil {
+				continue
+			}
+			out := msg.ToolResult.UserContent
+			if out == "" {
+				out = msg.ToolResult.Content
+			}
+			out = strings.TrimSpace(out)
+			if out == "" {
+				continue
+			}
+			fmt.Printf("tool      │ %s\n", out)
+			lastToolOutput = out
+		case harness.RoleAssistant:
+			content := strings.TrimSpace(msg.Content)
+			if content == "" || content == lastToolOutput {
+				continue
+			}
+			fmt.Printf("assistant │ %s\n", content)
+			lastToolOutput = ""
+		}
+	}
+
+	if result.StopReason == harness.StopMaxSteps {
+		fmt.Println("assistant │ stopped due to max steps")
 	}
 }
 
