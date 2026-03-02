@@ -24,7 +24,8 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 
 - Core harness loop, hooks, and thread state are implemented
 - Unit tests are in place for core loop behaviour and pause/resume
-- Provider adapters are planned next (OpenAI first, then Anthropic)
+- OpenAI provider adapter is implemented (`provider/openai`)
+- `examples/claw` provides a REPL harness for manual testing
 
 ## What it doesn't do
 
@@ -49,9 +50,9 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - [x] Add pause/resume support (`StopPaused`, `PendingToolCalls`, `Thread.ResolvePending`)
 - [x] Add lifecycle hooks and event emission
 - [x] Stabilise core loop semantics with unit tests
-- [ ] Add a runnable example under `examples/basic`
+- [x] Add a runnable REPL example under `examples/claw`
 - [ ] Add CI for `go test`, `go test -race`, and `go vet`
-- [ ] Implement `provider/openai` adapter (non-streaming + streaming)
+- [x] Implement `provider/openai` adapter (non-streaming + streaming)
 - [ ] Implement `provider/anthropic` adapter (non-streaming + streaming)
 - [ ] Add provider integration tests using local HTTP test servers
 - [ ] Cut `v0.1.0` once adapters + example + CI are complete
@@ -62,7 +63,8 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - [docs/runner.md](docs/runner.md) — optional helper for starting/stopping active runs
 - [docs/providers.md](docs/providers.md) — provider adapter contracts and type mappings
 - [docs/research.md](docs/research.md) — research notes and design rationale
-- [PLAN.md](PLAN.md) — original long-form planning document
+
+The `docs/` directory is the source of truth for design and implementation guidance.
 
 ## Pause And Resume
 
@@ -146,5 +148,13 @@ if strings.EqualFold(strings.TrimSpace(userInput), "stop") {
 runErr := <-done
 _ = runErr
 ```
+
+## Running Claw Example
+
+```bash
+OPENAI_API_KEY=... go run ./examples/claw
+```
+
+Then type prompts or control commands (`/stop`, `/history`, `/tools`, `/quit`).
 
 See [docs/architecture.md](docs/architecture.md) for the primary implementation guide.
