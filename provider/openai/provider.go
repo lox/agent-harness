@@ -300,7 +300,7 @@ func convertResponse(response *responses.Response) (*harness.ChatResult, error) 
 			assistant.ToolCalls = append(assistant.ToolCalls, harness.ToolCall{
 				ID:        callID,
 				Name:      output.Name,
-				Arguments: json.RawMessage(output.Arguments),
+				Arguments: normalizeArgumentsJSON(output.Arguments),
 			})
 		case responses.ResponseReasoningItem:
 			if len(output.Content) > 0 {
@@ -430,6 +430,10 @@ func normalizeArguments(raw json.RawMessage) string {
 		return "{}"
 	}
 	return string(raw)
+}
+
+func normalizeArgumentsJSON(raw string) json.RawMessage {
+	return json.RawMessage(normalizeArguments(json.RawMessage(raw)))
 }
 
 func normalizeToolSchema(schema map[string]any) map[string]any {

@@ -321,3 +321,44 @@ func TestProviderChatIgnoresBlankReasoningEffort(t *testing.T) {
 		t.Fatalf("reasoning effort = %q, want empty", request.Reasoning.Effort)
 	}
 }
+
+func TestConvertResponseNormalizesEmptyToolArguments(t *testing.T) {
+	var response sdkresponses.Response
+	if err := json.Unmarshal([]byte(`{
+		"id":"resp_1",
+		"object":"response",
+		"created_at":1,
+		"model":"gpt-5.4-mini",
+		"status":"completed",
+		"output":[
+			{
+				"id":"fc_1",
+				"type":"function_call",
+				"call_id":"call_1",
+				"name":"time_now",
+				"arguments":"",
+				"status":"completed"
+			}
+		],
+		"usage":{
+			"input_tokens":1,
+			"input_tokens_details":{"cached_tokens":0},
+			"output_tokens":1,
+			"output_tokens_details":{"reasoning_tokens":0},
+			"total_tokens":2
+		}
+	}`), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	result, err := convertResponse(&response)
+	if err != nil {
+		t.Fatalf("convertResponse() error = %v", err)
+	}
+	if len(result.Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(result.Message.ToolCalls))
+	}
+	if string(result.Message.ToolCalls[0].Arguments) != "{}" {
+		t.Fatalf("tool arguments = %q, want {}", result.Message.ToolCalls[0].Arguments)
+	}
+}
