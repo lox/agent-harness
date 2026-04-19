@@ -438,14 +438,18 @@ func normalizeArgumentsJSON(raw string) json.RawMessage {
 
 func normalizeToolSchema(schema map[string]any) map[string]any {
 	normalized, ok := normalizeSchemaValue(schema).(map[string]any)
-	if !ok {
-		return map[string]any{
-			"type":                 "object",
-			"properties":           map[string]any{},
-			"additionalProperties": false,
-		}
+	if !ok || len(normalized) == 0 {
+		return defaultToolSchema()
 	}
 	return normalized
+}
+
+func defaultToolSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{},
+		"additionalProperties": false,
+	}
 }
 
 func normalizeSchemaValue(value any) any {

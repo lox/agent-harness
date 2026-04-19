@@ -113,6 +113,34 @@ func TestBuildRequestNormalizesToolSchemasForStrictMode(t *testing.T) {
 	}
 }
 
+func TestBuildRequestNormalizesEmptyToolSchemaForStrictMode(t *testing.T) {
+	request, err := New().buildRequest(harness.ChatParams{
+		Model:    string(sdkopenai.ChatModelGPT5_4Mini),
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "hello"}},
+		Tools: []harness.ToolDef{{
+			Name: "time_now",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest() error = %v", err)
+	}
+
+	schema := request.Tools[0].OfFunction.Parameters
+	if got, ok := schema["type"].(string); !ok || got != "object" {
+		t.Fatalf("type = %#v, want object", schema["type"])
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties type = %T, want map[string]any", schema["properties"])
+	}
+	if len(props) != 0 {
+		t.Fatalf("properties len = %d, want 0", len(props))
+	}
+	if got, ok := schema["additionalProperties"].(bool); !ok || got {
+		t.Fatalf("additionalProperties = %#v, want false", schema["additionalProperties"])
+	}
+}
+
 func TestProviderChatNonStreamingUsesResponses(t *testing.T) {
 	model := string(sdkopenai.ChatModelGPT5_4)
 	reasoningEffort := string(sdkshared.ReasoningEffortXhigh)
