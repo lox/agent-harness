@@ -27,27 +27,30 @@ type app struct {
 	thread   *harness.Thread
 	tools    []harness.Tool
 
-	system   string
-	model    string
-	maxSteps int
+	system       string
+	model        string
+	maxSteps     int
+	providerOpts map[string]any
 
 	mu sync.Mutex
 }
 
 func main() {
-	modelFlag := flag.String("model", envOrDefault("OPENAI_MODEL", "gpt-4o-mini"), "model name")
+	modelFlag := flag.String("model", envOrDefault("OPENAI_MODEL", "gpt-5.4-mini"), "model name")
+	reasoningEffortFlag := flag.String("reasoning-effort", envOrDefault("OPENAI_REASONING_EFFORT", ""), "OpenAI reasoning effort (none, minimal, low, medium, high, xhigh)")
 	systemFlag := flag.String("system", "You are Claw, a concise command-line coding assistant.", "system prompt")
 	maxStepsFlag := flag.Int("max-steps", 8, "max tool loop steps per turn")
 	flag.Parse()
 
 	a := &app{
-		provider: openai.New(openai.WithDefaultModel(*modelFlag)),
-		runner:   runner.New(),
-		thread:   harness.NewThread(),
-		tools:    builtInTools(),
-		system:   *systemFlag,
-		model:    *modelFlag,
-		maxSteps: *maxStepsFlag,
+		provider:     openai.New(openai.WithDefaultModel(*modelFlag)),
+		runner:       runner.New(),
+		thread:       harness.NewThread(),
+		tools:        builtInTools(),
+		system:       *systemFlag,
+		model:        *modelFlag,
+		maxSteps:     *maxStepsFlag,
+		providerOpts: openAIProviderOptions(*reasoningEffortFlag),
 	}
 	a.run()
 }
@@ -135,6 +138,7 @@ func (a *app) handlePrompt(text string) {
 			harness.WithTools(a.tools...),
 			harness.WithModel(a.model),
 			harness.WithMaxSteps(a.maxSteps),
+			harness.WithProviderOptions(a.providerOpts),
 		)
 		if err != nil {
 			return err
@@ -274,4 +278,14 @@ func envOrDefault(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func openAIProviderOptions(reasoningEffort string) map[string]any {
+	reasoningEffort = strings.TrimSpace(reasoningEffort)
+	if reasoningEffort == "" {
+		return nil
+	}
+	return map[string]any{
+		"reasoning_effort": reasoningEffort,
+	}
 }

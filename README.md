@@ -16,6 +16,18 @@ result, err := harness.Run(ctx, provider,
 )
 ```
 
+For OpenAI-specific tuning, pass provider options per request:
+
+```go
+result, err := harness.Run(ctx, provider,
+    harness.WithMessages(thread.Messages...),
+    harness.WithModel("gpt-5.4"),
+    harness.WithProviderOptions(map[string]any{
+        "reasoning_effort": "xhigh",
+    }),
+)
+```
+
 ## What it does
 
 Implements the core agent loop: call the LLM → execute tool calls → feed results back → repeat. Everything else (storage, prompts, routing) is your problem.
@@ -25,8 +37,8 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - `v0.1.0` released: https://github.com/lox/agent-harness/releases/tag/v0.1.0
 - Core harness loop, hooks, and thread state are implemented
 - Unit tests are in place for core loop behaviour and pause/resume
-- OpenAI provider adapter is implemented (`provider/openai`)
-- Anthropic provider adapter is implemented (`provider/anthropic`)
+- OpenAI provider adapter is implemented (`provider/openai`, Responses API)
+- Anthropic provider adapter is implemented (`provider/anthropic`, Messages API)
 - `examples/claw` provides a REPL harness for manual testing
 
 ## What it doesn't do
@@ -40,6 +52,7 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 
 - Single `Run()` function, not a framework
 - `Provider` interface with one method
+- Adapters normalize harness messages into internal role-plus-part entries before mapping to provider SDKs
 - Tools bundle schema + execution in one place
 - Hooks for approval gates (`WithBeforeTool`), streaming (`WithOnDelta`), and observability (`WithEventHandler`)
 - Progressive disclosure via `WithToolFilter`
@@ -154,9 +167,11 @@ _ = runErr
 ## Running Claw Example
 
 ```bash
-OPENAI_API_KEY=... go run ./examples/claw
+OPENAI_API_KEY=... OPENAI_MODEL=gpt-5.4-mini OPENAI_REASONING_EFFORT=xhigh mise exec -- go run ./examples/claw
 ```
 
 Then type prompts or control commands (`/stop`, `/history`, `/tools`, `/quit`).
+
+The OpenAI adapter is pinned to `openai-go/v3` and now uses the Responses API, which is required for GPT-5.4 plus `reasoning_effort` plus tools. The public harness API still accepts the same `ChatParams`, while providers normalize the thread into internal role-plus-part entries before mapping to provider-specific SDK types.
 
 See [docs/architecture.md](docs/architecture.md) for the primary implementation guide.

@@ -10,6 +10,7 @@ import (
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	harness "github.com/lox/agent-harness"
+	"github.com/lox/agent-harness/internal/conversation"
 )
 
 // Provider implements harness.Provider for Anthropic's Messages API.
@@ -105,7 +106,11 @@ func (p *Provider) buildRequest(params harness.ChatParams) (anthropic.MessageNew
 		return anthropic.MessageNewParams{}, fmt.Errorf("model is required")
 	}
 
-	messages, systemBlocks, err := convertMessages(params.System, params.Messages)
+	entries, err := conversation.EntriesFromChat(params.System, params.Messages)
+	if err != nil {
+		return anthropic.MessageNewParams{}, err
+	}
+	messages, systemBlocks, err := convertEntries(entries)
 	if err != nil {
 		return anthropic.MessageNewParams{}, err
 	}
@@ -151,41 +156,62 @@ func (p *Provider) buildRequest(params harness.ChatParams) (anthropic.MessageNew
 	return request, nil
 }
 
-func convertMessages(system string, messages []harness.Message) ([]anthropic.MessageParam, []anthropic.TextBlockParam, error) {
-	out := make([]anthropic.MessageParam, 0, len(messages))
+func convertEntries(entries []conversation.Entry) ([]anthropic.MessageParam, []anthropic.TextBlockParam, error) {
+	out := make([]anthropic.MessageParam, 0, len(entries))
 	systemBlocks := make([]anthropic.TextBlockParam, 0, 1)
-	if system != "" {
-		systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: system})
-	}
 
-	for _, msg := range messages {
-		switch msg.Role {
+	for _, entry := range entries {
+		switch entry.Role {
 		case harness.RoleSystem:
-			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: msg.Content})
-		case harness.RoleUser:
-			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
-		case harness.RoleAssistant:
-			blocks := make([]anthropic.ContentBlockParamUnion, 0, len(msg.ToolCalls)+1)
-			if msg.Content != "" {
-				blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
-			}
-			for _, call := range msg.ToolCalls {
-				var input any
-				if len(call.Arguments) > 0 {
-					if err := json.Unmarshal(call.Arguments, &input); err != nil {
-						input = map[string]any{}
-					}
+			for _, part := range entry.Parts {
+				if part.Kind == conversation.PartText && part.Text != "" {
+					systemBlocks = append(systemBlocks, anthropic.TextBlockParam{Text: part.Text})
 				}
-				blocks = append(blocks, anthropic.NewToolUseBlock(call.ID, input, call.Name))
 			}
-			out = append(out, anthropic.NewAssistantMessage(blocks...))
+		case harness.RoleUser:
+			blocks := make([]anthropic.ContentBlockParamUnion, 0, len(entry.Parts))
+			for _, part := range entry.Parts {
+				if part.Kind == conversation.PartText && part.Text != "" {
+					blocks = append(blocks, anthropic.NewTextBlock(part.Text))
+				}
+			}
+			if len(blocks) > 0 {
+				out = append(out, anthropic.NewUserMessage(blocks...))
+			}
+		case harness.RoleAssistant:
+			blocks := make([]anthropic.ContentBlockParamUnion, 0, len(entry.Parts))
+			for _, part := range entry.Parts {
+				switch part.Kind {
+				case conversation.PartText:
+					if part.Text != "" {
+						blocks = append(blocks, anthropic.NewTextBlock(part.Text))
+					}
+				case conversation.PartToolCall:
+					var input any
+					if len(part.ToolCall.Arguments) > 0 {
+						if err := json.Unmarshal(part.ToolCall.Arguments, &input); err != nil {
+							input = map[string]any{}
+						}
+					}
+					blocks = append(blocks, anthropic.NewToolUseBlock(part.ToolCall.ID, input, part.ToolCall.Name))
+				}
+			}
+			if len(blocks) > 0 {
+				out = append(out, anthropic.NewAssistantMessage(blocks...))
+			}
 		case harness.RoleTool:
-			if msg.ToolResult == nil {
-				return nil, nil, fmt.Errorf("tool message missing tool result")
+			blocks := make([]anthropic.ContentBlockParamUnion, 0, len(entry.Parts))
+			for _, part := range entry.Parts {
+				if part.Kind != conversation.PartToolResult {
+					continue
+				}
+				blocks = append(blocks, anthropic.NewToolResultBlock(part.ToolResult.ToolCallID, part.ToolResult.Content, part.ToolResult.IsError))
 			}
-			out = append(out, anthropic.NewUserMessage(anthropic.NewToolResultBlock(msg.ToolResult.ToolCallID, msg.ToolResult.Content, msg.ToolResult.IsError)))
+			if len(blocks) > 0 {
+				out = append(out, anthropic.NewUserMessage(blocks...))
+			}
 		default:
-			return nil, nil, fmt.Errorf("unsupported message role %q", msg.Role)
+			return nil, nil, fmt.Errorf("unsupported message role %q", entry.Role)
 		}
 	}
 

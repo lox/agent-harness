@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	harness "github.com/lox/agent-harness"
-	openai "github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/packages/param"
-	"github.com/openai/openai-go/shared"
+	"github.com/lox/agent-harness/internal/conversation"
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Provider implements harness.Provider using the openai-go SDK.
@@ -90,46 +93,57 @@ func (p *Provider) Chat(ctx context.Context, params harness.ChatParams) (*harnes
 	}
 
 	if params.OnDelta == nil {
-		completion, err := p.client.Chat.Completions.New(ctx, request)
+		response, err := p.client.Responses.New(ctx, request)
 		if err != nil {
 			return nil, err
 		}
-		return convertResponse(completion)
+		return convertResponse(response)
 	}
 
-	stream := p.client.Chat.Completions.NewStreaming(ctx, request)
+	stream := p.client.Responses.NewStreaming(ctx, request)
 	defer stream.Close()
 
-	acc := openai.ChatCompletionAccumulator{}
+	emitter := newStreamEmitter(params.OnDelta)
+	var final *responses.Response
 	for stream.Next() {
-		chunk := stream.Current()
-		acc.AddChunk(chunk)
-		emitDeltas(params.OnDelta, chunk)
+		event := stream.Current()
+		emitter.emit(event)
+		if completed, ok := event.AsAny().(responses.ResponseCompletedEvent); ok {
+			response := completed.Response
+			final = &response
+		}
 	}
 	if err := stream.Err(); err != nil {
 		return nil, err
 	}
+	if final == nil {
+		return nil, fmt.Errorf("response stream completed without a final response")
+	}
 
-	return convertResponse(&acc.ChatCompletion)
+	return convertResponse(final)
 }
 
-func (p *Provider) buildRequest(params harness.ChatParams) (openai.ChatCompletionNewParams, error) {
+func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNewParams, error) {
 	model := params.Model
 	if model == "" {
 		model = p.model
 	}
 	if model == "" {
-		return openai.ChatCompletionNewParams{}, fmt.Errorf("model is required")
+		return responses.ResponseNewParams{}, fmt.Errorf("model is required")
 	}
 
-	messages, err := convertMessages(params.System, params.Messages)
+	entries, err := conversation.EntriesFromChat(params.System, params.Messages)
 	if err != nil {
-		return openai.ChatCompletionNewParams{}, err
+		return responses.ResponseNewParams{}, err
 	}
 
-	request := openai.ChatCompletionNewParams{
-		Model:    model,
-		Messages: messages,
+	request := responses.ResponseNewParams{
+		Model: shared.ResponsesModel(model),
+	}
+
+	input := convertEntries(entries)
+	if len(input) > 0 {
+		request.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: input}
 	}
 
 	if len(params.Tools) > 0 {
@@ -144,25 +158,29 @@ func (p *Provider) buildRequest(params harness.ChatParams) (openai.ChatCompletio
 			}
 		case "max_tokens":
 			if v, ok := asInt64(value); ok {
-				request.MaxCompletionTokens = param.NewOpt(v)
+				request.MaxOutputTokens = param.NewOpt(v)
 			}
 		case "top_p":
 			if v, ok := asFloat(value); ok {
 				request.TopP = param.NewOpt(v)
 			}
 		case "reasoning_effort":
-			if v, ok := value.(string); ok {
-				request.ReasoningEffort = shared.ReasoningEffort(v)
+			if v, ok := asString(value); ok {
+				request.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(v)}
 			}
 		case "response_format":
-			if v, ok := value.(string); ok {
+			if v, ok := asString(value); ok {
 				switch v {
 				case "json_object":
 					jsonFormat := shared.NewResponseFormatJSONObjectParam()
-					request.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{OfJSONObject: &jsonFormat}
+					request.Text = responses.ResponseTextConfigParam{
+						Format: responses.ResponseFormatTextConfigUnionParam{OfJSONObject: &jsonFormat},
+					}
 				case "text":
 					textFormat := shared.NewResponseFormatTextParam()
-					request.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{OfText: &textFormat}
+					request.Text = responses.ResponseTextConfigParam{
+						Format: responses.ResponseFormatTextConfigUnionParam{OfText: &textFormat},
+					}
 				}
 			}
 		default:
@@ -173,121 +191,321 @@ func (p *Provider) buildRequest(params harness.ChatParams) (openai.ChatCompletio
 	return request, nil
 }
 
-func convertMessages(system string, messages []harness.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
-	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
-	if system != "" {
-		out = append(out, openai.SystemMessage(system))
-	}
-
-	for _, msg := range messages {
-		switch msg.Role {
-		case harness.RoleSystem:
-			out = append(out, openai.SystemMessage(msg.Content))
-		case harness.RoleUser:
-			out = append(out, openai.UserMessage(msg.Content))
-		case harness.RoleAssistant:
-			assistant := openai.ChatCompletionAssistantMessageParam{}
-			if msg.Content != "" {
-				assistant.Content = openai.ChatCompletionAssistantMessageParamContentUnion{OfString: param.NewOpt(msg.Content)}
+func convertEntries(entries []conversation.Entry) responses.ResponseInputParam {
+	out := make(responses.ResponseInputParam, 0, len(entries))
+	for _, entry := range entries {
+		switch entry.Role {
+		case harness.RoleSystem, harness.RoleUser, harness.RoleAssistant:
+			if text := entryText(entry); text != "" {
+				out = append(out, responses.ResponseInputItemParamOfMessage(text, toInputRole(entry.Role)))
 			}
-			if len(msg.ToolCalls) > 0 {
-				assistant.ToolCalls = make([]openai.ChatCompletionMessageToolCallParam, 0, len(msg.ToolCalls))
-				for _, call := range msg.ToolCalls {
-					assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallParam{
-						ID: call.ID,
-						Function: openai.ChatCompletionMessageToolCallFunctionParam{
-							Name:      call.Name,
-							Arguments: string(call.Arguments),
-						},
-					})
+			if entry.Role == harness.RoleAssistant {
+				for _, part := range entry.Parts {
+					if part.Kind != conversation.PartToolCall {
+						continue
+					}
+					out = append(out, responses.ResponseInputItemParamOfFunctionCall(
+						normalizeArguments(part.ToolCall.Arguments),
+						part.ToolCall.ID,
+						part.ToolCall.Name,
+					))
 				}
 			}
-			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
 		case harness.RoleTool:
-			if msg.ToolResult == nil {
-				return nil, fmt.Errorf("tool message missing tool result")
-			}
-			out = append(out, openai.ToolMessage(msg.ToolResult.Content, msg.ToolResult.ToolCallID))
-		default:
-			return nil, fmt.Errorf("unsupported message role %q", msg.Role)
-		}
-	}
-
-	return out, nil
-}
-
-func convertTools(tools []harness.ToolDef) []openai.ChatCompletionToolParam {
-	out := make([]openai.ChatCompletionToolParam, 0, len(tools))
-	for _, tool := range tools {
-		parameters := shared.FunctionParameters{}
-		if len(tool.Parameters) > 0 {
-			if err := json.Unmarshal(tool.Parameters, &parameters); err != nil {
-				parameters = shared.FunctionParameters{}
+			for _, part := range entry.Parts {
+				if part.Kind != conversation.PartToolResult {
+					continue
+				}
+				out = append(out, responses.ResponseInputItemParamOfFunctionCallOutput(part.ToolResult.ToolCallID, part.ToolResult.Content))
 			}
 		}
-		out = append(out, openai.ChatCompletionToolParam{
-			Function: shared.FunctionDefinitionParam{
-				Name:        tool.Name,
-				Description: param.NewOpt(tool.Description),
-				Parameters:  parameters,
-			},
-		})
 	}
 	return out
 }
 
-func emitDeltas(onDelta func(harness.Delta), chunk openai.ChatCompletionChunk) {
-	if len(chunk.Choices) == 0 {
-		return
+func entryText(entry conversation.Entry) string {
+	var out strings.Builder
+	for _, part := range entry.Parts {
+		if part.Kind == conversation.PartText {
+			out.WriteString(part.Text)
+		}
 	}
-	delta := chunk.Choices[0].Delta
-	if delta.Content != "" {
-		onDelta(harness.Delta{Text: delta.Content})
-	}
-	for _, tc := range delta.ToolCalls {
-		onDelta(harness.Delta{ToolCall: &harness.ToolCallDelta{
-			Index:     int(tc.Index),
-			ID:        tc.ID,
-			Name:      tc.Function.Name,
-			Arguments: tc.Function.Arguments,
-		}})
+	return out.String()
+}
+
+func toInputRole(role harness.MessageRole) responses.EasyInputMessageRole {
+	switch role {
+	case harness.RoleSystem:
+		return responses.EasyInputMessageRoleSystem
+	case harness.RoleAssistant:
+		return responses.EasyInputMessageRoleAssistant
+	default:
+		return responses.EasyInputMessageRoleUser
 	}
 }
 
-func convertResponse(completion *openai.ChatCompletion) (*harness.ChatResult, error) {
-	if completion == nil {
-		return nil, fmt.Errorf("nil completion")
+func convertTools(tools []harness.ToolDef) []responses.ToolUnionParam {
+	out := make([]responses.ToolUnionParam, 0, len(tools))
+	for _, tool := range tools {
+		parameters := map[string]any{}
+		if len(tool.Parameters) > 0 {
+			if err := json.Unmarshal(tool.Parameters, &parameters); err != nil {
+				parameters = map[string]any{}
+			}
+		}
+		parameters = normalizeToolSchema(parameters)
+
+		fn := responses.FunctionToolParam{
+			Name:       tool.Name,
+			Parameters: parameters,
+			Strict:     param.NewOpt(true),
+		}
+		if tool.Description != "" {
+			fn.Description = param.NewOpt(tool.Description)
+		}
+
+		out = append(out, responses.ToolUnionParam{OfFunction: &fn})
 	}
-	if len(completion.Choices) == 0 {
-		return nil, fmt.Errorf("completion had no choices")
+	return out
+}
+
+func convertResponse(response *responses.Response) (*harness.ChatResult, error) {
+	if response == nil {
+		return nil, fmt.Errorf("nil response")
+	}
+	if len(response.Output) == 0 {
+		return nil, fmt.Errorf("response had no output items")
 	}
 
-	choice := completion.Choices[0]
-	assistant := harness.Message{
-		Role:    harness.RoleAssistant,
-		Content: choice.Message.Content,
-	}
+	assistant := harness.Message{Role: harness.RoleAssistant}
+	var content strings.Builder
+	var thinking strings.Builder
 
-	if len(choice.Message.ToolCalls) > 0 {
-		assistant.ToolCalls = make([]harness.ToolCall, 0, len(choice.Message.ToolCalls))
-		for _, toolCall := range choice.Message.ToolCalls {
+	for _, item := range response.Output {
+		switch output := item.AsAny().(type) {
+		case responses.ResponseOutputMessage:
+			for _, part := range output.Content {
+				switch contentPart := part.AsAny().(type) {
+				case responses.ResponseOutputText:
+					content.WriteString(contentPart.Text)
+				case responses.ResponseOutputRefusal:
+					content.WriteString(contentPart.Refusal)
+				}
+			}
+		case responses.ResponseFunctionToolCall:
+			callID := output.CallID
+			if callID == "" {
+				callID = output.ID
+			}
 			assistant.ToolCalls = append(assistant.ToolCalls, harness.ToolCall{
-				ID:        toolCall.ID,
-				Name:      toolCall.Function.Name,
-				Arguments: json.RawMessage(toolCall.Function.Arguments),
+				ID:        callID,
+				Name:      output.Name,
+				Arguments: json.RawMessage(output.Arguments),
 			})
+		case responses.ResponseReasoningItem:
+			if len(output.Content) > 0 {
+				for _, part := range output.Content {
+					thinking.WriteString(part.Text)
+				}
+				continue
+			}
+			for _, summary := range output.Summary {
+				thinking.WriteString(summary.Text)
+			}
 		}
 	}
 
+	assistant.Content = content.String()
+	assistant.Thinking = thinking.String()
+
 	result := &harness.ChatResult{Message: assistant}
-	if completion.Usage.JSON.TotalTokens.Valid() {
+	if response.Usage.JSON.TotalTokens.Valid() {
 		result.Usage = &harness.Usage{
-			InputTokens:  int(completion.Usage.PromptTokens),
-			OutputTokens: int(completion.Usage.CompletionTokens),
+			InputTokens:  int(response.Usage.InputTokens),
+			OutputTokens: int(response.Usage.OutputTokens),
 		}
 	}
 
 	return result, nil
+}
+
+type streamEmitter struct {
+	onDelta          func(harness.Delta)
+	nextToolCallIdx  int
+	toolCallsByIndex map[int64]streamToolCall
+}
+
+type streamToolCall struct {
+	Index         int
+	ID            string
+	Name          string
+	HeaderSent    bool
+	ArgumentsSent bool
+}
+
+func newStreamEmitter(onDelta func(harness.Delta)) *streamEmitter {
+	return &streamEmitter{
+		onDelta:          onDelta,
+		toolCallsByIndex: make(map[int64]streamToolCall),
+	}
+}
+
+func (e *streamEmitter) emit(event responses.ResponseStreamEventUnion) {
+	switch current := event.AsAny().(type) {
+	case responses.ResponseTextDeltaEvent:
+		e.onDelta(harness.Delta{Text: current.Delta})
+	case responses.ResponseRefusalDeltaEvent:
+		e.onDelta(harness.Delta{Text: current.Delta})
+	case responses.ResponseReasoningTextDeltaEvent:
+		e.onDelta(harness.Delta{Thinking: current.Delta})
+	case responses.ResponseReasoningSummaryTextDeltaEvent:
+		e.onDelta(harness.Delta{Thinking: current.Delta})
+	case responses.ResponseOutputItemAddedEvent:
+		if toolCall, ok := current.Item.AsAny().(responses.ResponseFunctionToolCall); ok {
+			e.registerToolCall(current.OutputIndex, toolCall)
+		}
+	case responses.ResponseFunctionCallArgumentsDeltaEvent:
+		e.emitToolCallDelta(current.OutputIndex, "", "", current.Delta, false)
+	case responses.ResponseFunctionCallArgumentsDoneEvent:
+		e.emitToolCallDelta(current.OutputIndex, "", current.Name, current.Arguments, true)
+	}
+}
+
+func (e *streamEmitter) registerToolCall(outputIndex int64, toolCall responses.ResponseFunctionToolCall) {
+	current, ok := e.toolCallsByIndex[outputIndex]
+	if !ok {
+		current.Index = e.nextToolCallIdx
+		e.nextToolCallIdx++
+	}
+	current.ID = toolCall.CallID
+	if current.ID == "" {
+		current.ID = toolCall.ID
+	}
+	current.Name = toolCall.Name
+	e.toolCallsByIndex[outputIndex] = current
+}
+
+func (e *streamEmitter) emitToolCallDelta(outputIndex int64, fallbackID, fallbackName, arguments string, final bool) {
+	current, ok := e.toolCallsByIndex[outputIndex]
+	if !ok {
+		current = streamToolCall{Index: e.nextToolCallIdx}
+		e.nextToolCallIdx++
+	}
+
+	if current.ID == "" {
+		current.ID = fallbackID
+	}
+	if current.Name == "" {
+		current.Name = fallbackName
+	}
+
+	delta := harness.ToolCallDelta{Index: current.Index}
+	if !current.HeaderSent && (current.ID != "" || current.Name != "") {
+		delta.ID = current.ID
+		delta.Name = current.Name
+		current.HeaderSent = true
+	}
+	if arguments != "" {
+		delta.Arguments = arguments
+	}
+
+	if final && current.ArgumentsSent && delta.Arguments != "" && delta.ID == "" && delta.Name == "" {
+		e.toolCallsByIndex[outputIndex] = current
+		return
+	}
+	if delta.Arguments != "" {
+		current.ArgumentsSent = true
+	}
+
+	e.toolCallsByIndex[outputIndex] = current
+
+	if delta.Arguments == "" && delta.ID == "" && delta.Name == "" {
+		return
+	}
+	e.onDelta(harness.Delta{ToolCall: &delta})
+}
+
+func normalizeArguments(raw json.RawMessage) string {
+	if strings.TrimSpace(string(raw)) == "" {
+		return "{}"
+	}
+	return string(raw)
+}
+
+func normalizeToolSchema(schema map[string]any) map[string]any {
+	normalized, ok := normalizeSchemaValue(schema).(map[string]any)
+	if !ok {
+		return map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		}
+	}
+	return normalized
+}
+
+func normalizeSchemaValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v)+1)
+		for key, child := range v {
+			switch key {
+			case "properties":
+				props, ok := child.(map[string]any)
+				if !ok {
+					out[key] = child
+					continue
+				}
+				normalizedProps := make(map[string]any, len(props))
+				for propName, propSchema := range props {
+					normalizedProps[propName] = normalizeSchemaValue(propSchema)
+				}
+				out[key] = normalizedProps
+			case "items", "$defs", "definitions":
+				out[key] = normalizeSchemaValue(child)
+			case "anyOf", "allOf", "oneOf":
+				out[key] = normalizeSchemaSlice(child)
+			default:
+				out[key] = child
+			}
+		}
+
+		if looksLikeObjectSchema(out) {
+			out["additionalProperties"] = false
+			if _, ok := out["type"]; !ok {
+				out["type"] = "object"
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, item := range v {
+			out = append(out, normalizeSchemaValue(item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func normalizeSchemaSlice(value any) any {
+	items, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, normalizeSchemaValue(item))
+	}
+	return out
+}
+
+func looksLikeObjectSchema(schema map[string]any) bool {
+	if typ, ok := schema["type"].(string); ok && typ == "object" {
+		return true
+	}
+	_, hasProperties := schema["properties"]
+	return hasProperties
 }
 
 func asFloat(v any) (float64, bool) {
@@ -328,4 +546,16 @@ func asInt64(v any) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func asString(v any) (string, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	return s, true
 }
