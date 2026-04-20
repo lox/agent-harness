@@ -135,17 +135,21 @@ func terminalStreamResponse(event responses.ResponseStreamEventUnion) (*response
 	case responses.ResponseIncompleteEvent:
 		response := current.Response
 		return &response, nil
+	case responses.ResponseErrorEvent:
+		return nil, fmt.Errorf("%s", formatStreamError("response error", current.Message))
 	case responses.ResponseFailedEvent:
-		message := strings.TrimSpace(current.Response.Error.Message)
-		if message == "" {
-			message = "response failed"
-		} else {
-			message = fmt.Sprintf("response failed: %s", message)
-		}
-		return nil, fmt.Errorf("%s", message)
+		return nil, fmt.Errorf("%s", formatStreamError("response failed", current.Response.Error.Message))
 	default:
 		return nil, nil
 	}
+}
+
+func formatStreamError(prefix, message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return prefix
+	}
+	return fmt.Sprintf("%s: %s", prefix, message)
 }
 
 func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNewParams, error) {

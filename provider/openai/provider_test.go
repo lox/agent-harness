@@ -386,6 +386,27 @@ func TestProviderChatStreamingReturnsResponseFailure(t *testing.T) {
 	}
 }
 
+func TestProviderChatStreamingReturnsResponseErrorEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"error\",\"sequence_number\":1,\"code\":\"server_error\",\"message\":\"gateway exploded\",\"param\":\"\"}\n\n"))
+	}))
+	defer server.Close()
+
+	p := New(WithBaseURL(server.URL), WithAPIKey("test-key"), WithDefaultModel(string(sdkopenai.ChatModelGPT5_4Mini)))
+
+	_, err := p.Chat(context.Background(), harness.ChatParams{
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "hello"}},
+		OnDelta:  func(harness.Delta) {},
+	})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want response error event failure")
+	}
+	if got := err.Error(); got != "response error: gateway exploded" {
+		t.Fatalf("Chat() error = %q, want response error: gateway exploded", got)
+	}
+}
+
 func TestProviderChatIgnoresBlankReasoningEffort(t *testing.T) {
 	request, err := New().buildRequest(harness.ChatParams{
 		Model:    string(sdkopenai.ChatModelGPT5_4),
