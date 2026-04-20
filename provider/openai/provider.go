@@ -105,22 +105,47 @@ func (p *Provider) Chat(ctx context.Context, params harness.ChatParams) (*harnes
 
 	emitter := newStreamEmitter(params.OnDelta)
 	var final *responses.Response
+	var finalErr error
 	for stream.Next() {
 		event := stream.Current()
 		emitter.emit(event)
-		if completed, ok := event.AsAny().(responses.ResponseCompletedEvent); ok {
-			response := completed.Response
-			final = &response
+		if response, err := terminalStreamResponse(event); response != nil || err != nil {
+			final = response
+			finalErr = err
 		}
 	}
 	if err := stream.Err(); err != nil {
 		return nil, err
+	}
+	if finalErr != nil {
+		return nil, finalErr
 	}
 	if final == nil {
 		return nil, fmt.Errorf("response stream completed without a final response")
 	}
 
 	return convertResponse(final)
+}
+
+func terminalStreamResponse(event responses.ResponseStreamEventUnion) (*responses.Response, error) {
+	switch current := event.AsAny().(type) {
+	case responses.ResponseCompletedEvent:
+		response := current.Response
+		return &response, nil
+	case responses.ResponseIncompleteEvent:
+		response := current.Response
+		return &response, nil
+	case responses.ResponseFailedEvent:
+		message := strings.TrimSpace(current.Response.Error.Message)
+		if message == "" {
+			message = "response failed"
+		} else {
+			message = fmt.Sprintf("response failed: %s", message)
+		}
+		return nil, fmt.Errorf("%s", message)
+	default:
+		return nil, nil
+	}
 }
 
 func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNewParams, error) {

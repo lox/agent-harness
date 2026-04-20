@@ -334,6 +334,58 @@ func TestProviderChatStreamingToolCalls(t *testing.T) {
 	}
 }
 
+func TestProviderChatStreamingAcceptsIncompleteTerminalResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"sequence_number\":1,\"logprobs\":[]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"sequence_number\":2,\"logprobs\":[]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.incomplete\",\"sequence_number\":3,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"model\":\"gpt-5.4-mini\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"incomplete\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":9}}}\n\n"))
+	}))
+	defer server.Close()
+
+	p := New(WithBaseURL(server.URL), WithAPIKey("test-key"), WithDefaultModel(string(sdkopenai.ChatModelGPT5_4Mini)))
+
+	var textDeltas []string
+	result, err := p.Chat(context.Background(), harness.ChatParams{
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "hello"}},
+		OnDelta: func(d harness.Delta) {
+			if d.Text != "" {
+				textDeltas = append(textDeltas, d.Text)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if got := strings.Join(textDeltas, ""); got != "Hello" {
+		t.Fatalf("text deltas = %q, want Hello", got)
+	}
+	if result.Message.Content != "Hello" {
+		t.Fatalf("content = %q, want Hello", result.Message.Content)
+	}
+}
+
+func TestProviderChatStreamingReturnsResponseFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"model\":\"gpt-5.4-mini\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"backend blew up\"},\"output\":[]}}\n\n"))
+	}))
+	defer server.Close()
+
+	p := New(WithBaseURL(server.URL), WithAPIKey("test-key"), WithDefaultModel(string(sdkopenai.ChatModelGPT5_4Mini)))
+
+	_, err := p.Chat(context.Background(), harness.ChatParams{
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "hello"}},
+		OnDelta:  func(harness.Delta) {},
+	})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want response failure")
+	}
+	if got := err.Error(); got != "response failed: backend blew up" {
+		t.Fatalf("Chat() error = %q, want response failed: backend blew up", got)
+	}
+}
+
 func TestProviderChatIgnoresBlankReasoningEffort(t *testing.T) {
 	request, err := New().buildRequest(harness.ChatParams{
 		Model:    string(sdkopenai.ChatModelGPT5_4),
