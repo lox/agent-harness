@@ -111,6 +111,12 @@ func TestBuildRequestNormalizesToolSchemasForStrictMode(t *testing.T) {
 	if got, ok := options["additionalProperties"].(bool); !ok || got {
 		t.Fatalf("nested additionalProperties = %#v, want false", options["additionalProperties"])
 	}
+	if got, ok := schema["required"].([]string); !ok || len(got) != 2 || got[0] != "options" || got[1] != "text" {
+		t.Fatalf("root required = %#v, want [options text]", schema["required"])
+	}
+	if got, ok := options["required"].([]string); !ok || len(got) != 1 || got[0] != "loud" {
+		t.Fatalf("nested required = %#v, want [loud]", options["required"])
+	}
 }
 
 func TestBuildRequestNormalizesEmptyToolSchemaForStrictMode(t *testing.T) {
@@ -138,6 +144,52 @@ func TestBuildRequestNormalizesEmptyToolSchemaForStrictMode(t *testing.T) {
 	}
 	if got, ok := schema["additionalProperties"].(bool); !ok || got {
 		t.Fatalf("additionalProperties = %#v, want false", schema["additionalProperties"])
+	}
+	if got, ok := schema["required"].([]string); !ok || len(got) != 0 {
+		t.Fatalf("required = %#v, want empty", schema["required"])
+	}
+}
+
+func TestBuildRequestNormalizesDefinitionSchemasForStrictMode(t *testing.T) {
+	request, err := New().buildRequest(harness.ChatParams{
+		Model:    string(sdkopenai.ChatModelGPT5_4Mini),
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "hello"}},
+		Tools: []harness.ToolDef{{
+			Name: "lookup_address",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"address":{"$ref":"#/$defs/Address"}
+				},
+				"$defs":{
+					"Address":{
+						"type":"object",
+						"properties":{
+							"city":{"type":"string"}
+						}
+					}
+				}
+			}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest() error = %v", err)
+	}
+
+	schema := request.Tools[0].OfFunction.Parameters
+	defs, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		t.Fatalf("$defs type = %T, want map[string]any", schema["$defs"])
+	}
+	address, ok := defs["Address"].(map[string]any)
+	if !ok {
+		t.Fatalf("Address type = %T, want map[string]any", defs["Address"])
+	}
+	if got, ok := address["additionalProperties"].(bool); !ok || got {
+		t.Fatalf("definition additionalProperties = %#v, want false", address["additionalProperties"])
+	}
+	if got, ok := address["required"].([]string); !ok || len(got) != 1 || got[0] != "city" {
+		t.Fatalf("definition required = %#v, want [city]", address["required"])
 	}
 }
 

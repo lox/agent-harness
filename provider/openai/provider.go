@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -477,6 +478,7 @@ func defaultToolSchema() map[string]any {
 	return map[string]any{
 		"type":                 "object",
 		"properties":           map[string]any{},
+		"required":             []string{},
 		"additionalProperties": false,
 	}
 }
@@ -490,7 +492,7 @@ func normalizeSchemaValue(value any) any {
 			case "properties":
 				props, ok := child.(map[string]any)
 				if !ok {
-					out[key] = child
+					out[key] = normalizeSchemaValue(child)
 					continue
 				}
 				normalizedProps := make(map[string]any, len(props))
@@ -498,12 +500,8 @@ func normalizeSchemaValue(value any) any {
 					normalizedProps[propName] = normalizeSchemaValue(propSchema)
 				}
 				out[key] = normalizedProps
-			case "items", "$defs", "definitions":
-				out[key] = normalizeSchemaValue(child)
-			case "anyOf", "allOf", "oneOf":
-				out[key] = normalizeSchemaSlice(child)
 			default:
-				out[key] = child
+				out[key] = normalizeSchemaValue(child)
 			}
 		}
 
@@ -512,6 +510,12 @@ func normalizeSchemaValue(value any) any {
 			if _, ok := out["type"]; !ok {
 				out["type"] = "object"
 			}
+			properties, ok := out["properties"].(map[string]any)
+			if !ok {
+				properties = map[string]any{}
+				out["properties"] = properties
+			}
+			out["required"] = requiredPropertyNames(properties)
 		}
 		return out
 	case []any:
@@ -525,24 +529,21 @@ func normalizeSchemaValue(value any) any {
 	}
 }
 
-func normalizeSchemaSlice(value any) any {
-	items, ok := value.([]any)
-	if !ok {
-		return value
-	}
-	out := make([]any, 0, len(items))
-	for _, item := range items {
-		out = append(out, normalizeSchemaValue(item))
-	}
-	return out
-}
-
 func looksLikeObjectSchema(schema map[string]any) bool {
 	if typ, ok := schema["type"].(string); ok && typ == "object" {
 		return true
 	}
 	_, hasProperties := schema["properties"]
 	return hasProperties
+}
+
+func requiredPropertyNames(properties map[string]any) []string {
+	required := make([]string, 0, len(properties))
+	for name := range properties {
+		required = append(required, name)
+	}
+	sort.Strings(required)
+	return required
 }
 
 func asFloat(v any) (float64, bool) {
