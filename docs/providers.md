@@ -18,7 +18,36 @@ All adapters should follow the same flow:
 2. `Chat()` maps harness request types to SDK request types.
 3. Non-streaming path issues one request and converts final response.
 4. Streaming path emits `Delta` chunks via `ChatParams.OnDelta` and accumulates to one final message.
-5. Response conversion maps usage and tool calls back to harness types.
+5. Response conversion maps usage, tool calls, response identity, finish state,
+   and opaque round-trip data back to harness types.
+
+## Result Contract
+
+Adapters should populate `ChatResult.ResponseID`, `FinishReason`,
+`FinishDetails`, and `Usage` whenever the provider exposes them. Finish reasons
+must use the provider-neutral harness values rather than passing through raw
+provider strings:
+
+- natural completion -> `FinishReasonEndTurn`
+- complete local tool calls -> `FinishReasonToolUse`
+- refusal -> `FinishReasonRefusal`
+- output-token exhaustion -> `FinishReasonMaxTokens`
+- other partial output -> `FinishReasonIncomplete`
+- provider-requested resubmission -> `FinishReasonContinuation`
+
+If a response contains provider-native state needed on a later request, store
+its serialized representation in `Message.ProviderData` and restore it when
+converting that message back to the provider SDK. The core deliberately treats
+this field as opaque JSON. This keeps signed thinking, redacted content, server
+tool blocks, and continuation payloads intact without making them part of the
+harness model.
+
+`Usage.InputTokens` contains uncached input when the provider reports uncached
+and cached input separately; otherwise it contains the provider's primary input
+count. Populate cache fields independently from the provider response. The
+5-minute and 1-hour creation counters are subdivisions of
+`CacheCreationInputTokens`, and `CacheReadInputTokens` may be the source for the
+normalized `CachedInputTokens` value when a provider uses cache-read terminology.
 
 ## Provider Packages
 

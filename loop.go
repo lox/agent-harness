@@ -11,10 +11,12 @@ import (
 type StopReason int
 
 const (
-	StopEndTurn   StopReason = iota // model finished naturally (no more tool calls)
-	StopMaxSteps                    // step budget exhausted
-	StopCancelled                   // context cancelled
-	StopPaused                      // hook requested pause (e.g. for approval)
+	StopEndTurn    StopReason = iota // model finished naturally (no more tool calls)
+	StopMaxSteps                     // step budget exhausted
+	StopCancelled                    // context cancelled
+	StopPaused                       // hook requested pause (e.g. for approval)
+	StopRefusal                      // provider refused the request
+	StopIncomplete                   // provider returned incomplete or token-limited output
 )
 
 // Result contains everything produced by a single Run invocation.
@@ -33,6 +35,18 @@ type Result struct {
 
 	// StopReason indicates why the loop terminated.
 	StopReason StopReason `json:"stop_reason"`
+
+	// FinishReason is the last provider finish reason observed. It preserves
+	// distinctions that StopReason groups together, such as max_tokens and
+	// incomplete.
+	FinishReason FinishReason `json:"finish_reason,omitempty"`
+
+	// FinishDetails contains optional provider detail for FinishReason, such as
+	// a refusal explanation or the cause of incomplete output.
+	FinishDetails string `json:"finish_details,omitempty"`
+
+	// ResponseID is the most recent non-empty provider response identifier.
+	ResponseID string `json:"response_id,omitempty"`
 
 	// PendingToolCalls contains tool calls that were proposed by the model
 	// but not yet executed when the loop was paused.
@@ -99,14 +113,35 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 		result.Messages = append(result.Messages, assistantMsg)
 		result.TotalUsage.Add(chatResult.Usage)
 		result.Steps = step + 1
+		if chatResult.ResponseID != "" {
+			result.ResponseID = chatResult.ResponseID
+		}
+
+		finishReason, err := resolveFinishReason(chatResult.FinishReason, assistantMsg)
+		if err != nil {
+			return nil, fmt.Errorf("step %d: %w", step, err)
+		}
+		result.FinishReason = finishReason
+		result.FinishDetails = chatResult.FinishDetails
 
 		assistantMsgEvent := assistantMsg
 		emit(cfg, Event{Type: EventMessage, Step: step, Message: &assistantMsgEvent})
 		emit(cfg, Event{Type: EventTurnEnd, Step: step})
 
-		if len(assistantMsg.ToolCalls) == 0 {
+		switch finishReason {
+		case FinishReasonEndTurn:
 			result.StopReason = StopEndTurn
 			return result, nil
+		case FinishReasonRefusal:
+			result.StopReason = StopRefusal
+			return result, nil
+		case FinishReasonMaxTokens, FinishReasonIncomplete:
+			result.StopReason = StopIncomplete
+			return result, nil
+		case FinishReasonContinuation:
+			continue
+		case FinishReasonToolUse:
+			// Execute the calls below.
 		}
 
 		for i, call := range assistantMsg.ToolCalls {
@@ -165,6 +200,37 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 
 	result.StopReason = StopMaxSteps
 	return result, nil
+}
+
+func resolveFinishReason(reason FinishReason, message Message) (FinishReason, error) {
+	if reason == FinishReasonUnspecified {
+		if len(message.ToolCalls) > 0 {
+			return FinishReasonToolUse, nil
+		}
+		return FinishReasonEndTurn, nil
+	}
+
+	switch reason {
+	case FinishReasonEndTurn:
+		if len(message.ToolCalls) > 0 {
+			return "", errors.New("provider returned end_turn with tool calls")
+		}
+	case FinishReasonToolUse:
+		if len(message.ToolCalls) == 0 {
+			return "", errors.New("provider returned tool_use without tool calls")
+		}
+	case FinishReasonContinuation:
+		if len(message.ToolCalls) > 0 {
+			return "", errors.New("provider returned continuation with tool calls")
+		}
+	case FinishReasonRefusal, FinishReasonMaxTokens, FinishReasonIncomplete:
+		// These states are terminal even when a provider includes partial tool
+		// calls. Run retains the message but never executes those calls.
+	default:
+		return "", fmt.Errorf("provider returned unknown finish reason %q", reason)
+	}
+
+	return reason, nil
 }
 
 func buildToolMap(tools []Tool) map[string]Tool {
