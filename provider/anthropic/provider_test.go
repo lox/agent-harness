@@ -236,7 +236,7 @@ func TestProviderStreamingAccumulationAndDeltas(t *testing.T) {
 	if textDelta != "Inspecting" || thinkingDelta != "consider" {
 		t.Fatalf("stream deltas text/thinking = %q/%q", textDelta, thinkingDelta)
 	}
-	if len(toolDeltas) != 2 || toolDeltas[0].ID != "toolu_stream" || toolDeltas[0].Name != "read_file" || toolDeltas[1].Arguments != `{"path":"main.go"}` {
+	if len(toolDeltas) != 2 || toolDeltas[0].Index != 0 || toolDeltas[1].Index != 0 || toolDeltas[0].ID != "toolu_stream" || toolDeltas[0].Name != "read_file" || toolDeltas[1].Arguments != `{"path":"main.go"}` {
 		t.Fatalf("tool deltas = %+v", toolDeltas)
 	}
 }

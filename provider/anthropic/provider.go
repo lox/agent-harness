@@ -77,13 +77,17 @@ func (p *Provider) Chat(ctx context.Context, params harness.ChatParams) (*harnes
 	defer func() { _ = stream.Close() }()
 
 	var acc anthropic.Message
+	var toolCallIndexes map[int64]int
+	if params.OnDelta != nil {
+		toolCallIndexes = make(map[int64]int)
+	}
 	for stream.Next() {
 		event := stream.Current()
 		if err := acc.Accumulate(event); err != nil {
 			return nil, err
 		}
 		if params.OnDelta != nil {
-			emitDeltas(params.OnDelta, event)
+			emitDeltas(params.OnDelta, event, toolCallIndexes)
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -270,12 +274,14 @@ func convertTools(tools []harness.ToolDef) []anthropic.ToolUnionParam {
 	return out
 }
 
-func emitDeltas(onDelta func(harness.Delta), event anthropic.MessageStreamEventUnion) {
+func emitDeltas(onDelta func(harness.Delta), event anthropic.MessageStreamEventUnion, toolCallIndexes map[int64]int) {
 	switch ev := event.AsAny().(type) {
 	case anthropic.ContentBlockStartEvent:
 		if block, ok := ev.ContentBlock.AsAny().(anthropic.ToolUseBlock); ok {
+			toolIndex := len(toolCallIndexes)
+			toolCallIndexes[ev.Index] = toolIndex
 			onDelta(harness.Delta{ToolCall: &harness.ToolCallDelta{
-				Index: int(ev.Index),
+				Index: toolIndex,
 				ID:    block.ID,
 				Name:  block.Name,
 			}})
@@ -287,7 +293,10 @@ func emitDeltas(onDelta func(harness.Delta), event anthropic.MessageStreamEventU
 		case anthropic.ThinkingDelta:
 			onDelta(harness.Delta{Thinking: d.Thinking})
 		case anthropic.InputJSONDelta:
-			onDelta(harness.Delta{ToolCall: &harness.ToolCallDelta{Index: int(ev.Index), Arguments: d.PartialJSON}})
+			toolIndex, ok := toolCallIndexes[ev.Index]
+			if ok {
+				onDelta(harness.Delta{ToolCall: &harness.ToolCallDelta{Index: toolIndex, Arguments: d.PartialJSON}})
+			}
 		}
 	}
 }
