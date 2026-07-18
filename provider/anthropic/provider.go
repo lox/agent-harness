@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	harness "github.com/lox/agent-harness"
 )
+
+const defaultMaxOutputTokens int64 = 65536
 
 // Provider implements harness.Provider for Anthropic's Messages API.
 type Provider struct {
@@ -45,7 +48,7 @@ func WithRequestOption(opt option.RequestOption) Option {
 }
 
 func New(opts ...Option) *Provider {
-	cfg := config{defaultModel: anthropic.ModelClaudeSonnet4_20250514}
+	cfg := config{defaultModel: anthropic.ModelClaudeFable5}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
@@ -70,16 +73,8 @@ func (p *Provider) Chat(ctx context.Context, params harness.ChatParams) (*harnes
 		return nil, err
 	}
 
-	if params.OnDelta == nil {
-		msg, err := p.client.Messages.New(ctx, request)
-		if err != nil {
-			return nil, err
-		}
-		return convertResponse(msg)
-	}
-
 	stream := p.client.Messages.NewStreaming(ctx, request)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	var acc anthropic.Message
 	for stream.Next() {
@@ -87,7 +82,9 @@ func (p *Provider) Chat(ctx context.Context, params harness.ChatParams) (*harnes
 		if err := acc.Accumulate(event); err != nil {
 			return nil, err
 		}
-		emitDeltas(params.OnDelta, event)
+		if params.OnDelta != nil {
+			emitDeltas(params.OnDelta, event)
+		}
 	}
 	if err := stream.Err(); err != nil {
 		return nil, err
@@ -111,16 +108,21 @@ func (p *Provider) buildRequest(params harness.ChatParams) (anthropic.MessageNew
 	}
 
 	request := anthropic.MessageNewParams{
-		Model:     model,
-		Messages:  messages,
-		System:    systemBlocks,
-		MaxTokens: 4096,
+		Model:        model,
+		Messages:     messages,
+		System:       systemBlocks,
+		MaxTokens:    defaultMaxOutputTokens,
+		CacheControl: anthropic.NewCacheControlEphemeralParam(),
 	}
 
 	if len(params.Tools) > 0 {
 		request.Tools = convertTools(params.Tools)
 	}
 
+	cacheEnabled := true
+	var thinkingBudget int64
+	var reasoningEffort string
+	var outputEffort string
 	for key, value := range params.Options {
 		switch key {
 		case "temperature":
@@ -141,11 +143,43 @@ func (p *Provider) buildRequest(params harness.ChatParams) (anthropic.MessageNew
 			}
 		case "thinking_budget":
 			if v, ok := asInt64(value); ok {
-				request.Thinking = anthropic.ThinkingConfigParamOfEnabled(v)
+				thinkingBudget = v
+			}
+		case "reasoning_effort":
+			if v, ok := value.(string); ok {
+				reasoningEffort = v
+			}
+		case "output_effort":
+			if v, ok := value.(string); ok {
+				outputEffort = v
+			}
+		case "prompt_cache":
+			if v, ok := value.(bool); ok {
+				cacheEnabled = v
+			}
+		case "cache_ttl":
+			if v, ok := value.(string); ok {
+				request.CacheControl.TTL = anthropic.CacheControlEphemeralTTL(v)
 			}
 		default:
 			log.Printf("harness/provider/anthropic: ignoring unknown option %q", key)
 		}
+	}
+
+	if !cacheEnabled {
+		request.CacheControl = anthropic.CacheControlEphemeralParam{}
+	}
+	if outputEffort != "" {
+		request.OutputConfig.Effort = anthropic.OutputConfigEffort(outputEffort)
+	} else if reasoningEffort != "" {
+		request.OutputConfig.Effort = anthropic.OutputConfigEffort(reasoningEffort)
+	}
+	if requiresExplicitAdaptiveThinking(model) {
+		request.Thinking = anthropic.ThinkingConfigParamUnion{
+			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
+		}
+	} else if !usesImplicitAdaptiveThinking(model) && thinkingBudget > 0 {
+		request.Thinking = anthropic.ThinkingConfigParamOfEnabled(thinkingBudget)
 	}
 
 	return request, nil
@@ -165,6 +199,17 @@ func convertMessages(system string, messages []harness.Message) ([]anthropic.Mes
 		case harness.RoleUser:
 			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
 		case harness.RoleAssistant:
+			if len(msg.ProviderData) > 0 {
+				var native anthropic.MessageParam
+				if err := json.Unmarshal(msg.ProviderData, &native); err != nil {
+					return nil, nil, fmt.Errorf("decode Anthropic provider data: %w", err)
+				}
+				if native.Role != "assistant" {
+					return nil, nil, fmt.Errorf("anthropic provider data has role %q, want assistant", native.Role)
+				}
+				out = append(out, native)
+				continue
+			}
 			blocks := make([]anthropic.ContentBlockParamUnion, 0, len(msg.ToolCalls)+1)
 			if msg.Content != "" {
 				blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
@@ -227,6 +272,14 @@ func convertTools(tools []harness.ToolDef) []anthropic.ToolUnionParam {
 
 func emitDeltas(onDelta func(harness.Delta), event anthropic.MessageStreamEventUnion) {
 	switch ev := event.AsAny().(type) {
+	case anthropic.ContentBlockStartEvent:
+		if block, ok := ev.ContentBlock.AsAny().(anthropic.ToolUseBlock); ok {
+			onDelta(harness.Delta{ToolCall: &harness.ToolCallDelta{
+				Index: int(ev.Index),
+				ID:    block.ID,
+				Name:  block.Name,
+			}})
+		}
 	case anthropic.ContentBlockDeltaEvent:
 		switch d := ev.Delta.AsAny().(type) {
 		case anthropic.TextDelta:
@@ -255,14 +308,77 @@ func convertResponse(msg *anthropic.Message) (*harness.ChatResult, error) {
 			assistant.ToolCalls = append(assistant.ToolCalls, harness.ToolCall{ID: b.ID, Name: b.Name, Arguments: b.Input})
 		}
 	}
+	nativeMessage, err := json.Marshal(msg.ToParam())
+	if err != nil {
+		return nil, fmt.Errorf("encode Anthropic provider data: %w", err)
+	}
+	assistant.ProviderData = nativeMessage
 
-	return &harness.ChatResult{
-		Message: assistant,
+	cacheCreation5m := int(msg.Usage.CacheCreation.Ephemeral5mInputTokens)
+	cacheCreation1h := int(msg.Usage.CacheCreation.Ephemeral1hInputTokens)
+	cacheCreation := cacheCreation5m + cacheCreation1h
+	if cacheCreation == 0 {
+		cacheCreation = int(msg.Usage.CacheCreationInputTokens)
+	}
+
+	result := &harness.ChatResult{
+		Message:       assistant,
+		ResponseID:    msg.ID,
+		FinishReason:  convertStopReason(msg.StopReason),
+		FinishDetails: refusalDetails(msg),
 		Usage: &harness.Usage{
-			InputTokens:  int(msg.Usage.InputTokens),
-			OutputTokens: int(msg.Usage.OutputTokens),
+			InputTokens:                int(msg.Usage.InputTokens),
+			OutputTokens:               int(msg.Usage.OutputTokens),
+			CachedInputTokens:          int(msg.Usage.CacheReadInputTokens),
+			CacheCreationInputTokens:   cacheCreation,
+			CacheReadInputTokens:       int(msg.Usage.CacheReadInputTokens),
+			CacheCreation5mInputTokens: cacheCreation5m,
+			CacheCreation1hInputTokens: cacheCreation1h,
 		},
-	}, nil
+	}
+
+	return result, nil
+}
+
+func convertStopReason(reason anthropic.StopReason) harness.FinishReason {
+	switch reason {
+	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence:
+		return harness.FinishReasonEndTurn
+	case anthropic.StopReasonToolUse:
+		return harness.FinishReasonToolUse
+	case anthropic.StopReasonRefusal:
+		return harness.FinishReasonRefusal
+	case anthropic.StopReasonMaxTokens:
+		return harness.FinishReasonMaxTokens
+	case anthropic.StopReasonPauseTurn:
+		return harness.FinishReasonContinuation
+	default:
+		return harness.FinishReasonIncomplete
+	}
+}
+
+func refusalDetails(msg *anthropic.Message) string {
+	details := strings.TrimSpace(msg.StopDetails.Explanation)
+	if category := strings.TrimSpace(string(msg.StopDetails.Category)); category != "" {
+		if details != "" {
+			details = category + ": " + details
+		} else {
+			details = category
+		}
+	}
+	return details
+}
+
+func requiresExplicitAdaptiveThinking(model string) bool {
+	return strings.HasPrefix(model, "claude-opus-4-8") ||
+		strings.HasPrefix(model, "claude-opus-4-7") ||
+		strings.HasPrefix(model, "claude-opus-4-6") ||
+		strings.HasPrefix(model, "claude-sonnet-5") ||
+		strings.HasPrefix(model, "claude-sonnet-4-6")
+}
+
+func usesImplicitAdaptiveThinking(model string) bool {
+	return strings.HasPrefix(model, "claude-fable-5")
 }
 
 func asFloat(v any) (float64, bool) {

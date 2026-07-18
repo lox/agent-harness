@@ -89,7 +89,7 @@ Unknown option keys should be ignored safely (without failing the run).
 
 Target SDK: `github.com/anthropics/anthropic-sdk-go`
 
-Status: implemented with non-streaming and streaming support.
+Status: implemented with equivalent accumulated and delta-streaming caller modes. The adapter uses the SDK's streaming transport in both cases so large output limits are not rejected by the SDK's long-running request guard.
 
 Constructor options:
 
@@ -105,12 +105,19 @@ Constructor options:
 - `top_p`
 - `top_k`
 - `thinking_budget`
+- `reasoning_effort` or `output_effort` -> Anthropic output effort
+- `prompt_cache` -> enable or disable ephemeral prompt caching (enabled by default)
+- `cache_ttl` -> `5m` (the default) or `1h`
 
 Adapter-specific mapping considerations:
 
 - System prompt is a top-level request field, not a normal message.
 - Tool result responses are represented as user-role tool-result blocks by the SDK.
 - Thinking content is mapped to `Message.Thinking` when present.
+- Fable is the default model; current Fable, Opus, and Sonnet model IDs can be selected per run.
+- Models that require an explicit adaptive-thinking request receive one automatically.
+- Signed thinking and continuation blocks are retained in `Message.ProviderData` and replayed unchanged on later tool-loop calls.
+- Response IDs, stop reasons, refusal details, and cache-aware usage are mapped to the shared result contract.
 
 ## Testing Approach
 
