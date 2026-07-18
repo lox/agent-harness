@@ -26,6 +26,11 @@ type Message struct {
 
 	// Thinking/reasoning content from the model (if any).
 	Thinking string `json:"thinking,omitempty"`
+
+	// ProviderData is opaque, provider-owned message state that an adapter may
+	// need to round-trip unchanged, such as signed reasoning or continuation
+	// blocks. The harness stores and forwards it without interpretation.
+	ProviderData json.RawMessage `json:"provider_data,omitempty"`
 }
 
 // ToolCall represents a tool invocation requested by the model.

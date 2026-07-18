@@ -24,14 +24,37 @@ type ChatParams struct {
 
 // ChatResult is what the provider returns.
 type ChatResult struct {
-	Message Message // the assistant's response (may include tool calls)
-	Usage   *Usage  // token usage, if available
+	Message       Message      // the assistant's response (may include tool calls)
+	ResponseID    string       // provider-assigned response identifier, if available
+	FinishReason  FinishReason // why the provider ended this response
+	FinishDetails string       // optional provider detail about the finish reason
+	Usage         *Usage       // token usage, if available
 }
+
+// FinishReason describes why a provider response ended. Providers should set a
+// reason explicitly. An unspecified reason is accepted for compatibility and
+// inferred as end_turn or tool_use from the returned message.
+type FinishReason string
+
+const (
+	FinishReasonUnspecified  FinishReason = ""
+	FinishReasonEndTurn      FinishReason = "end_turn"
+	FinishReasonToolUse      FinishReason = "tool_use"
+	FinishReasonRefusal      FinishReason = "refusal"
+	FinishReasonMaxTokens    FinishReason = "max_tokens"
+	FinishReasonIncomplete   FinishReason = "incomplete"
+	FinishReasonContinuation FinishReason = "continuation"
+)
 
 // Usage tracks token consumption.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens                int `json:"input_tokens"`
+	OutputTokens               int `json:"output_tokens"`
+	CachedInputTokens          int `json:"cached_input_tokens,omitempty"`
+	CacheCreationInputTokens   int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens       int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreation5mInputTokens int `json:"cache_creation_5m_input_tokens,omitempty"`
+	CacheCreation1hInputTokens int `json:"cache_creation_1h_input_tokens,omitempty"`
 }
 
 // Add adds usage values when provided.
@@ -41,6 +64,11 @@ func (u *Usage) Add(other *Usage) {
 	}
 	u.InputTokens += other.InputTokens
 	u.OutputTokens += other.OutputTokens
+	u.CachedInputTokens += other.CachedInputTokens
+	u.CacheCreationInputTokens += other.CacheCreationInputTokens
+	u.CacheReadInputTokens += other.CacheReadInputTokens
+	u.CacheCreation5mInputTokens += other.CacheCreation5mInputTokens
+	u.CacheCreation1hInputTokens += other.CacheCreation1hInputTokens
 }
 
 // Delta represents a streaming chunk from the provider.
