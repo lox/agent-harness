@@ -38,6 +38,11 @@ func TestProviderRequestMapsHistoryToolsAndOptions(t *testing.T) {
 		if got := body["max_output_tokens"]; got != float64(8192) {
 			t.Fatalf("max_output_tokens = %#v", got)
 		}
+		text := body["text"].(map[string]any)
+		format := text["format"].(map[string]any)
+		if got := format["type"]; got != "json_object" {
+			t.Fatalf("text.format.type = %#v, want json_object", got)
+		}
 		reasoning := body["reasoning"].(map[string]any)
 		if got := reasoning["effort"]; got != "xhigh" {
 			t.Fatalf("reasoning.effort = %#v", got)
@@ -82,6 +87,10 @@ func TestProviderRequestMapsHistoryToolsAndOptions(t *testing.T) {
 		if parameters["type"] != "object" || parameters["properties"] == nil {
 			t.Fatalf("tool parameters = %#v", parameters)
 		}
+		required := parameters["required"].([]any)
+		if len(required) != 1 || required[0] != "q" {
+			t.Fatalf("tool required fields = %#v, want [q]", required)
+		}
 		if _, nested := tool["function"]; nested {
 			t.Fatalf("Responses tool unexpectedly used Chat Completions wrapper: %#v", tool)
 		}
@@ -105,12 +114,13 @@ func TestProviderRequestMapsHistoryToolsAndOptions(t *testing.T) {
 		Tools: []harness.ToolDef{{
 			Name:        "lookup",
 			Description: "look something up",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`),
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"},"limit":{"type":"integer"}},"required":["q"]}`),
 		}},
 		Options: map[string]any{
 			"prompt_cache_key":  "analysis-session",
 			"reasoning_effort":  "xhigh",
 			"max_output_tokens": 8192,
+			"response_format":   "json_object",
 		},
 	})
 	if err != nil {
@@ -225,6 +235,30 @@ func TestExplicitPreviousResponseIDUsesMatchingHistorySuffix(t *testing.T) {
 	input := body["input"].([]any)
 	if len(input) != 1 || input[0].(map[string]any)["type"] != "function_call_output" {
 		t.Fatalf("continuation input = %#v", input)
+	}
+}
+
+func TestBuildRequestOptsIntoStrictToolsWithoutRewritingSchema(t *testing.T) {
+	p := New(WithDefaultModel("gpt-5.4"))
+	request, err := p.buildRequest(harness.ChatParams{
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "hello"}},
+		Tools: []harness.ToolDef{{
+			Name:       "lookup",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"},"limit":{"type":"integer"}},"required":["q"]}`),
+		}},
+		Options: map[string]any{"strict_tools": true},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest() error = %v", err)
+	}
+
+	tool := request.Tools[0].OfFunction
+	if !tool.Strict.Valid() || !tool.Strict.Value {
+		t.Fatalf("tool strict = %#v, want true", tool.Strict)
+	}
+	required := tool.Parameters["required"].([]any)
+	if len(required) != 1 || required[0] != "q" {
+		t.Fatalf("tool required fields = %#v, want unchanged [q]", required)
 	}
 }
 

@@ -64,7 +64,7 @@ Current status:
 
 ## OpenAI Responses Adapter
 
-Target SDK: `github.com/openai/openai-go`
+Target SDK: `github.com/openai/openai-go/v3`
 
 Package: `provider/openai`
 
@@ -89,8 +89,21 @@ Constructor options:
 - `max_output_tokens` (and the `max_tokens` compatibility alias) -> output limit
 - `temperature` and `top_p` -> sampling controls
 - `parallel_tool_calls` -> enable or disable parallel function calls
+- `response_format` -> `text` or `json_object` output formatting
+- `strict_tools` -> opt all function tools into OpenAI strict mode
 
 Unknown option keys are ignored safely without failing the run.
+
+Function tool schemas are always passed through unchanged. Strict mode is
+disabled by default and only enabled when `strict_tools` is `true`; callers are
+responsible for supplying schemas that meet OpenAI's strict-mode requirements.
+The adapter does not make optional fields required or otherwise rewrite schema
+semantics.
+
+Moving the adapter to the SDK's `/v3` module leaves the harness provider and
+constructor APIs unchanged, except that `WithRequestOption` now accepts
+`option.RequestOption` from `github.com/openai/openai-go/v3/option`. Callers
+using that SDK escape hatch must update their import path.
 
 Both streaming and non-streaming calls return the terminal response ID, the
 same assembled assistant text and function calls, normalized finish reasons,
