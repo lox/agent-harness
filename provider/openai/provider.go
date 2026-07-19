@@ -329,7 +329,7 @@ func convertResponse(response *responses.Response) (*harness.ChatResult, error) 
 		return nil, fmt.Errorf("encode OpenAI provider data: %w", err)
 	}
 	message := harness.Message{Role: harness.RoleAssistant, ProviderData: providerData}
-	var text strings.Builder
+	var textBlocks []string
 	var thinking strings.Builder
 	refused := false
 	for _, item := range response.Output {
@@ -338,10 +338,10 @@ func convertResponse(response *responses.Response) (*harness.ChatResult, error) 
 			for _, content := range item.AsMessage().Content {
 				switch content.Type {
 				case "output_text":
-					text.WriteString(content.Text)
+					textBlocks = append(textBlocks, content.Text)
 				case "refusal":
 					refused = true
-					text.WriteString(content.Refusal)
+					textBlocks = append(textBlocks, content.Refusal)
 				}
 			}
 		case "function_call":
@@ -357,7 +357,7 @@ func convertResponse(response *responses.Response) (*harness.ChatResult, error) 
 			}
 		}
 	}
-	message.Content = text.String()
+	message.Content = strings.Join(textBlocks, "\n")
 	message.Thinking = thinking.String()
 
 	finishReason := harness.FinishReasonEndTurn

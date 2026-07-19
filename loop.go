@@ -163,7 +163,10 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 		case FinishReasonContinuation:
 			continue
 		case FinishReasonToolUse:
-			// Execute the calls below.
+			if step+1 >= cfg.maxSteps {
+				result.StopReason = StopMaxSteps
+				return result, nil
+			}
 		}
 
 		for i, call := range assistantMsg.ToolCalls {

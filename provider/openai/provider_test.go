@@ -262,6 +262,32 @@ func TestProviderNormalizesTerminalStates(t *testing.T) {
 	}
 }
 
+func TestProviderJoinsOutputTextBlocksWithNewlines(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, `{
+			"id":"resp_text_blocks",
+			"object":"response",
+			"status":"completed",
+			"output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[
+				{"type":"output_text","text":"first block","annotations":[]},
+				{"type":"output_text","text":"second block","annotations":[]}
+			]}],
+			"usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":5}
+		}`)
+	}))
+	defer server.Close()
+
+	result, err := New(WithBaseURL(server.URL), WithAPIKey("test")).Chat(context.Background(), harness.ChatParams{
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if result.Message.Content != "first block\nsecond block" {
+		t.Fatalf("message content = %q, want newline-separated blocks", result.Message.Content)
+	}
+}
+
 func TestProviderStreamingAssemblesEquivalentFinalResponse(t *testing.T) {
 	terminal := combinedResponse("resp_stream", "call_stream", "lookup", `{"q":"docs"}`, "answer")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

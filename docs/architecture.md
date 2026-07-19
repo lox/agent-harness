@@ -81,7 +81,7 @@ accounting model rather than sum every cache field together.
 5. Interpret the provider finish reason
 6. On `end_turn`, `refusal`, or incomplete output, return the matching stop state
 7. On `continuation`, append the assistant message unchanged and call the provider again
-8. On `tool_use`, apply `WithBeforeTool`, execute each call, and append its `RoleTool` result
+8. On `tool_use`, when another provider turn remains, apply `WithBeforeTool`, execute each call, and append its `RoleTool` result
 9. Apply `WithAfterTool`
 10. Repeat until a terminal state, hook pause, cancellation, or max-steps
 
@@ -106,6 +106,9 @@ Provider continuation is not a stop reason. It consumes a step and continues
 inside `Run`, so repeated continuation responses eventually return
 `StopMaxSteps`. `Result.ResponseID` retains the most recent non-empty provider
 response ID and `Result.FinishReason` retains the last observed provider state.
+If the last permitted provider turn returns `tool_use`, the assistant message
+and its metadata remain in the result, but the tools are not executed because
+their results could not be sent to another provider turn.
 
 ## Thread State Model
 

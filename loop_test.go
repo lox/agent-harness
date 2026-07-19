@@ -323,24 +323,82 @@ func TestRunUnknownToolReturnsToolErrorMessage(t *testing.T) {
 	}
 }
 
-func TestRunStopsAtMaxSteps(t *testing.T) {
-	p := &mockProvider{results: []*ChatResult{{
-		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "echo"}}},
-	}}}
+func TestRunStopsBeforeExecutingToolCallsAtMaxSteps(t *testing.T) {
+	p := &mockProvider{results: []*ChatResult{
+		{
+			Message:      Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "echo"}}},
+			ResponseID:   "response-1",
+			FinishReason: FinishReasonToolUse,
+			Usage:        &Usage{InputTokens: 2, OutputTokens: 3},
+		},
+		{
+			Message: Message{
+				Role:      RoleAssistant,
+				Content:   "I need one more tool result.",
+				ToolCalls: []ToolCall{{ID: "2", Name: "echo"}},
+			},
+			ResponseID:    "response-2",
+			FinishReason:  FinishReasonToolUse,
+			FinishDetails: "tool requested",
+			Usage:         &Usage{InputTokens: 5, OutputTokens: 7},
+		},
+	}}
 
+	toolExecutions := 0
 	tool := Tool{ToolDef: ToolDef{Name: "echo"}, Execute: func(_ context.Context, call ToolCall) (*ToolResult, error) {
+		toolExecutions++
 		return &ToolResult{ToolCallID: call.ID, Content: "ok"}, nil
 	}}
 
-	res, err := Run(context.Background(), p, WithTools(tool), WithMaxSteps(1))
+	res, err := Run(context.Background(), p, WithTools(tool), WithMaxSteps(2))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if res.StopReason != StopMaxSteps {
 		t.Fatalf("StopReason = %v, want %v", res.StopReason, StopMaxSteps)
 	}
-	if len(res.Messages) != 2 {
-		t.Fatalf("len(Messages) = %d, want 2", len(res.Messages))
+	if len(p.calls) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(p.calls))
+	}
+	if toolExecutions != 1 {
+		t.Fatalf("tool executions = %d, want 1", toolExecutions)
+	}
+	if res.Steps != 2 {
+		t.Fatalf("Steps = %d, want 2", res.Steps)
+	}
+	if res.ResponseID != "response-2" {
+		t.Fatalf("ResponseID = %q, want response-2", res.ResponseID)
+	}
+	if res.FinishReason != FinishReasonToolUse || res.FinishDetails != "tool requested" {
+		t.Fatalf("finish = %q (%q), want %q (%q)", res.FinishReason, res.FinishDetails, FinishReasonToolUse, "tool requested")
+	}
+	if got := res.TotalUsage; got.InputTokens != 7 || got.OutputTokens != 10 {
+		t.Fatalf("TotalUsage = %+v, want input=7 output=10", got)
+	}
+	if len(res.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(res.Messages))
+	}
+	last := res.Messages[2]
+	if last.Content != "I need one more tool result." || len(last.ToolCalls) != 1 || last.ToolCalls[0].ID != "2" {
+		t.Fatalf("last assistant message = %+v", last)
+	}
+}
+
+func TestRunEndTurnOnLastAllowedStepSucceeds(t *testing.T) {
+	p := &mockProvider{results: []*ChatResult{{
+		Message:      Message{Role: RoleAssistant, Content: "done"},
+		FinishReason: FinishReasonEndTurn,
+	}}}
+
+	res, err := Run(context.Background(), p, WithMaxSteps(1))
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if res.StopReason != StopEndTurn {
+		t.Fatalf("StopReason = %v, want %v", res.StopReason, StopEndTurn)
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(p.calls))
 	}
 }
 
