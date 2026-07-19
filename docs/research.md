@@ -46,7 +46,8 @@ The harness extracts that reusable loop and leaves app-specific concerns (storag
 
 ## Deliberate v1 Exclusions
 
-- Built-in storage backends
+- Conversation and thread storage in the core harness; the optional `memory`
+  package provides a separate Markdown-backed memory layer
 - Multi-agent routing and orchestration layers
 - Automatic context compression/summarisation
 - Built-in provider fallback chains

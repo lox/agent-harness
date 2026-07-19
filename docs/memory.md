@@ -38,6 +38,11 @@ The section loads:
 - today's dated memory files
 - yesterday's dated memory files
 
+Bootstrap content is limited to 64 KiB by default. When the limit is reached,
+the prompt tells the model to use `memory_search` and `memory_get` for the
+remaining context. Pass `memory.WithBootstrapByteLimit(limit)` to change the
+limit, or use a value of `0` or less to disable truncation.
+
 The prompt also tells the model to use `memory_search` before answering from
 prior work, preferences, decisions, plans, people, dates, or stored context.
 
@@ -99,7 +104,9 @@ _, err := store.CaptureThread(ctx, thread, memory.CaptureOptions{
 Capture writes recent context to a timestamped file under `memory/`. It does not
 promote into `MEMORY.md`; durable promotion should be a separate, reviewable
 step. Concurrent captures claim filenames atomically, so equal timestamps do
-not overwrite earlier captures.
+not overwrite earlier captures. Tool result content is omitted by default; set
+`CaptureOptions.IncludeToolResults` when the captured transcript should include
+it.
 
 ## Consolidation
 
