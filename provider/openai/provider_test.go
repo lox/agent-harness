@@ -288,6 +288,26 @@ func TestProviderJoinsOutputTextBlocksWithNewlines(t *testing.T) {
 	}
 }
 
+func TestProviderNormalizesEmptyToolCallArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, toolCallResponse("resp_tool", "call_1", "time_now", ""))
+	}))
+	defer server.Close()
+
+	result, err := New(WithBaseURL(server.URL), WithAPIKey("test")).Chat(context.Background(), harness.ChatParams{
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "what time is it?"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(result.Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(result.Message.ToolCalls))
+	}
+	if got := string(result.Message.ToolCalls[0].Arguments); got != `{}` {
+		t.Fatalf("tool arguments = %q, want {}", got)
+	}
+}
+
 func TestProviderStreamingAssemblesEquivalentFinalResponse(t *testing.T) {
 	terminal := combinedResponse("resp_stream", "call_stream", "lookup", `{"q":"docs"}`, "answer")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
