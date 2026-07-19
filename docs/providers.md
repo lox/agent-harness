@@ -59,14 +59,20 @@ provider/
 
 Current status:
 
-- `provider/openai`: implemented
+- `provider/openai`: implemented Responses API adapter
 - `provider/anthropic`: implemented
 
-## OpenAI Adapter
+## OpenAI Responses Adapter
 
 Target SDK: `github.com/openai/openai-go`
 
-Status: implemented with non-streaming and streaming support.
+Package: `provider/openai`
+
+The OpenAI adapter uses the Responses API. It supports full input history and
+stores response IDs in the assistant message's opaque `ProviderData`. Later
+requests use the most recent ID as `previous_response_id` and send only the
+messages after that response. The package no longer sends Chat Completions API
+requests.
 
 Constructor options:
 
@@ -77,13 +83,20 @@ Constructor options:
 
 `ChatParams.Options` mappings:
 
-- `temperature` -> request temperature field
-- `max_tokens` -> completion token limit
-- `top_p` -> nucleus sampling field
-- `reasoning_effort` -> model reasoning effort where supported
-- `response_format` -> JSON/text response mode
+- `previous_response_id` -> explicit stateful continuation override
+- `prompt_cache_key` -> stable prompt-cache routing key
+- `reasoning_effort` -> reasoning effort, including `xhigh`
+- `max_output_tokens` (and the `max_tokens` compatibility alias) -> output limit
+- `temperature` and `top_p` -> sampling controls
+- `parallel_tool_calls` -> enable or disable parallel function calls
 
-Unknown option keys should be ignored safely (without failing the run).
+Unknown option keys are ignored safely without failing the run.
+
+Both streaming and non-streaming calls return the terminal response ID, the
+same assembled assistant text and function calls, normalized finish reasons,
+and cached-input token usage. Function calls use the API's `call_id` as the
+harness `ToolCall.ID`, so generic `RoleTool` results map directly to
+`function_call_output` continuation items.
 
 ## Anthropic Adapter
 
