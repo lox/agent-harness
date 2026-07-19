@@ -1,3 +1,5 @@
+// Package openai implements the harness provider contract with OpenAI's
+// Responses API.
 package openai
 
 import (
@@ -6,15 +8,17 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	harness "github.com/lox/agent-harness"
 	openai "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
+	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
 )
 
-// Provider implements harness.Provider using the openai-go SDK.
+// Provider implements harness.Provider using OpenAI's Responses API.
 type Provider struct {
 	client openai.Client
 	model  string
@@ -27,38 +31,34 @@ type config struct {
 	requestOpts  []option.RequestOption
 }
 
-// Option configures an OpenAI provider.
+type providerData struct {
+	ResponseID string `json:"response_id"`
+}
+
+// Option configures a Responses API provider.
 type Option func(*config)
 
 // WithAPIKey configures the OpenAI API key.
 func WithAPIKey(key string) Option {
-	return func(c *config) {
-		c.apiKey = key
-	}
+	return func(c *config) { c.apiKey = key }
 }
 
-// WithBaseURL configures a custom OpenAI-compatible endpoint.
+// WithBaseURL configures a custom OpenAI endpoint.
 func WithBaseURL(url string) Option {
-	return func(c *config) {
-		c.baseURL = url
-	}
+	return func(c *config) { c.baseURL = url }
 }
 
-// WithDefaultModel configures the provider default model used when ChatParams.Model is empty.
+// WithDefaultModel configures the default used when ChatParams.Model is empty.
 func WithDefaultModel(model string) Option {
-	return func(c *config) {
-		c.defaultModel = model
-	}
+	return func(c *config) { c.defaultModel = model }
 }
 
 // WithRequestOption appends a raw openai-go request option.
 func WithRequestOption(opt option.RequestOption) Option {
-	return func(c *config) {
-		c.requestOpts = append(c.requestOpts, opt)
-	}
+	return func(c *config) { c.requestOpts = append(c.requestOpts, opt) }
 }
 
-// New constructs a provider/openai adapter.
+// New constructs a Responses API adapter.
 func New(opts ...Option) *Provider {
 	cfg := config{defaultModel: "gpt-4o-mini"}
 	for _, opt := range opts {
@@ -82,7 +82,7 @@ func New(opts ...Option) *Provider {
 	}
 }
 
-// Chat converts harness types to OpenAI request/response types.
+// Chat converts harness messages and tools to Responses API input items.
 func (p *Provider) Chat(ctx context.Context, params harness.ChatParams) (*harness.ChatResult, error) {
 	request, err := p.buildRequest(params)
 	if err != nil {
@@ -90,80 +90,159 @@ func (p *Provider) Chat(ctx context.Context, params harness.ChatParams) (*harnes
 	}
 
 	if params.OnDelta == nil {
-		completion, err := p.client.Chat.Completions.New(ctx, request)
+		response, err := p.client.Responses.New(ctx, request)
 		if err != nil {
 			return nil, err
 		}
-		return convertResponse(completion)
+		return convertResponse(response)
 	}
 
-	stream := p.client.Chat.Completions.NewStreaming(ctx, request)
+	stream := p.client.Responses.NewStreaming(ctx, request)
 	defer stream.Close()
 
-	acc := openai.ChatCompletionAccumulator{}
+	var terminal *responses.Response
+	toolIndexes := make(map[int64]int)
+	nextToolIndex := 0
 	for stream.Next() {
-		chunk := stream.Current()
-		acc.AddChunk(chunk)
-		emitDeltas(params.OnDelta, chunk)
+		event := stream.Current()
+		switch event.Type {
+		case "response.output_text.delta":
+			params.OnDelta(harness.Delta{Text: event.AsResponseOutputTextDelta().Delta})
+		case "response.refusal.delta":
+			params.OnDelta(harness.Delta{Text: event.AsResponseRefusalDelta().Delta})
+		case "response.reasoning_summary_text.delta":
+			params.OnDelta(harness.Delta{Thinking: event.AsResponseReasoningSummaryTextDelta().Delta})
+		case "response.output_item.added":
+			added := event.AsResponseOutputItemAdded()
+			if added.Item.Type == "function_call" {
+				call := added.Item.AsFunctionCall()
+				toolIndexes[added.OutputIndex] = nextToolIndex
+				params.OnDelta(harness.Delta{ToolCall: &harness.ToolCallDelta{
+					Index: nextToolIndex,
+					ID:    call.CallID,
+					Name:  call.Name,
+				}})
+				nextToolIndex++
+			}
+		case "response.function_call_arguments.delta":
+			delta := event.AsResponseFunctionCallArgumentsDelta()
+			index, ok := toolIndexes[delta.OutputIndex]
+			if !ok {
+				index = int(delta.OutputIndex)
+			}
+			params.OnDelta(harness.Delta{ToolCall: &harness.ToolCallDelta{
+				Index:     index,
+				Arguments: delta.Delta,
+			}})
+		case "response.completed":
+			response := event.AsResponseCompleted().Response
+			terminal = &response
+		case "response.incomplete":
+			response := event.AsResponseIncomplete().Response
+			terminal = &response
+		case "response.failed":
+			response := event.AsResponseFailed().Response
+			if response.Error.Message != "" {
+				return nil, fmt.Errorf("responses API: %s", response.Error.Message)
+			}
+			return nil, fmt.Errorf("responses API response failed")
+		case "error":
+			streamError := event.AsError()
+			return nil, fmt.Errorf("responses API: %s", streamError.Message)
+		}
 	}
 	if err := stream.Err(); err != nil {
 		return nil, err
 	}
+	if terminal == nil {
+		return nil, fmt.Errorf("responses API stream ended without a terminal response")
+	}
 
-	return convertResponse(&acc.ChatCompletion)
+	return convertResponse(terminal)
 }
 
-func (p *Provider) buildRequest(params harness.ChatParams) (openai.ChatCompletionNewParams, error) {
+func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNewParams, error) {
 	model := params.Model
 	if model == "" {
 		model = p.model
 	}
 	if model == "" {
-		return openai.ChatCompletionNewParams{}, fmt.Errorf("model is required")
+		return responses.ResponseNewParams{}, fmt.Errorf("model is required")
 	}
 
-	messages, err := convertMessages(params.System, params.Messages)
+	previousResponseID, explicitContinuation := stringOption(params.Options, "previous_response_id")
+	start := 0
+	if explicitContinuation && previousResponseID != "" {
+		var err error
+		_, start, err = findResponseID(params.Messages, previousResponseID)
+		if err != nil {
+			return responses.ResponseNewParams{}, err
+		}
+	} else if !explicitContinuation {
+		var err error
+		previousResponseID, start, err = findResponseID(params.Messages, "")
+		if err != nil {
+			return responses.ResponseNewParams{}, err
+		}
+	}
+
+	instructionsBase := params.System
+	for _, msg := range params.Messages[:start] {
+		if msg.Role == harness.RoleSystem && msg.Content != "" {
+			if instructionsBase != "" {
+				instructionsBase += "\n\n"
+			}
+			instructionsBase += msg.Content
+		}
+	}
+	input, instructions, err := convertMessages(instructionsBase, params.Messages[start:])
 	if err != nil {
-		return openai.ChatCompletionNewParams{}, err
+		return responses.ResponseNewParams{}, err
 	}
 
-	request := openai.ChatCompletionNewParams{
-		Model:    model,
-		Messages: messages,
+	request := responses.ResponseNewParams{
+		Model: shared.ResponsesModel(model),
+		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
 	}
-
+	if instructions != "" {
+		request.Instructions = param.NewOpt(instructions)
+	}
+	if previousResponseID != "" {
+		request.PreviousResponseID = param.NewOpt(previousResponseID)
+	}
 	if len(params.Tools) > 0 {
 		request.Tools = convertTools(params.Tools)
 	}
 
 	for key, value := range params.Options {
 		switch key {
+		case "previous_response_id":
+			// Applied above because it also controls history conversion.
+		case "prompt_cache_key":
+			if v, ok := value.(string); ok {
+				request.PromptCacheKey = param.NewOpt(v)
+			}
+		case "reasoning_effort":
+			if v, ok := value.(string); ok {
+				// Use the string-backed SDK type so new values such as xhigh remain
+				// available even when the generated SDK constants lag the API.
+				request.Reasoning.Effort = shared.ReasoningEffort(v)
+			}
+		case "max_output_tokens", "max_tokens":
+			if v, ok := asInt64(value); ok {
+				request.MaxOutputTokens = param.NewOpt(v)
+			}
 		case "temperature":
 			if v, ok := asFloat(value); ok {
 				request.Temperature = param.NewOpt(v)
-			}
-		case "max_tokens":
-			if v, ok := asInt64(value); ok {
-				request.MaxCompletionTokens = param.NewOpt(v)
 			}
 		case "top_p":
 			if v, ok := asFloat(value); ok {
 				request.TopP = param.NewOpt(v)
 			}
-		case "reasoning_effort":
-			if v, ok := value.(string); ok {
-				request.ReasoningEffort = shared.ReasoningEffort(v)
-			}
-		case "response_format":
-			if v, ok := value.(string); ok {
-				switch v {
-				case "json_object":
-					jsonFormat := shared.NewResponseFormatJSONObjectParam()
-					request.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{OfJSONObject: &jsonFormat}
-				case "text":
-					textFormat := shared.NewResponseFormatTextParam()
-					request.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{OfText: &textFormat}
-				}
+		case "parallel_tool_calls":
+			if v, ok := value.(bool); ok {
+				request.ParallelToolCalls = param.NewOpt(v)
 			}
 		default:
 			log.Printf("harness/provider/openai: ignoring unknown option %q", key)
@@ -173,121 +252,180 @@ func (p *Provider) buildRequest(params harness.ChatParams) (openai.ChatCompletio
 	return request, nil
 }
 
-func convertMessages(system string, messages []harness.Message) ([]openai.ChatCompletionMessageParamUnion, error) {
-	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
+func convertMessages(system string, messages []harness.Message) (responses.ResponseInputParam, string, error) {
+	input := make(responses.ResponseInputParam, 0, len(messages))
+	instructions := make([]string, 0, 1)
 	if system != "" {
-		out = append(out, openai.SystemMessage(system))
+		instructions = append(instructions, system)
 	}
 
 	for _, msg := range messages {
 		switch msg.Role {
 		case harness.RoleSystem:
-			out = append(out, openai.SystemMessage(msg.Content))
-		case harness.RoleUser:
-			out = append(out, openai.UserMessage(msg.Content))
-		case harness.RoleAssistant:
-			assistant := openai.ChatCompletionAssistantMessageParam{}
 			if msg.Content != "" {
-				assistant.Content = openai.ChatCompletionAssistantMessageParamContentUnion{OfString: param.NewOpt(msg.Content)}
+				instructions = append(instructions, msg.Content)
 			}
-			if len(msg.ToolCalls) > 0 {
-				assistant.ToolCalls = make([]openai.ChatCompletionMessageToolCallParam, 0, len(msg.ToolCalls))
-				for _, call := range msg.ToolCalls {
-					assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallParam{
-						ID: call.ID,
-						Function: openai.ChatCompletionMessageToolCallFunctionParam{
-							Name:      call.Name,
-							Arguments: string(call.Arguments),
-						},
-					})
-				}
+		case harness.RoleUser:
+			input = append(input, responses.ResponseInputItemParamOfMessage(msg.Content, responses.EasyInputMessageRoleUser))
+		case harness.RoleAssistant:
+			if msg.Content != "" {
+				input = append(input, responses.ResponseInputItemParamOfMessage(msg.Content, responses.EasyInputMessageRoleAssistant))
 			}
-			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
+			for _, call := range msg.ToolCalls {
+				input = append(input, responses.ResponseInputItemParamOfFunctionCall(string(call.Arguments), call.ID, call.Name))
+			}
 		case harness.RoleTool:
 			if msg.ToolResult == nil {
-				return nil, fmt.Errorf("tool message missing tool result")
+				return nil, "", fmt.Errorf("tool message missing tool result")
 			}
-			out = append(out, openai.ToolMessage(msg.ToolResult.Content, msg.ToolResult.ToolCallID))
+			input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(
+				msg.ToolResult.ToolCallID,
+				msg.ToolResult.Content,
+			))
 		default:
-			return nil, fmt.Errorf("unsupported message role %q", msg.Role)
+			return nil, "", fmt.Errorf("unsupported message role %q", msg.Role)
 		}
 	}
 
-	return out, nil
+	return input, strings.Join(instructions, "\n\n"), nil
 }
 
-func convertTools(tools []harness.ToolDef) []openai.ChatCompletionToolParam {
-	out := make([]openai.ChatCompletionToolParam, 0, len(tools))
+func convertTools(tools []harness.ToolDef) []responses.ToolUnionParam {
+	out := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
-		parameters := shared.FunctionParameters{}
+		parameters := map[string]any{}
 		if len(tool.Parameters) > 0 {
 			if err := json.Unmarshal(tool.Parameters, &parameters); err != nil {
-				parameters = shared.FunctionParameters{}
+				parameters = map[string]any{}
 			}
 		}
-		out = append(out, openai.ChatCompletionToolParam{
-			Function: shared.FunctionDefinitionParam{
-				Name:        tool.Name,
-				Description: param.NewOpt(tool.Description),
-				Parameters:  parameters,
-			},
-		})
+		converted := responses.ToolParamOfFunction(tool.Name, parameters, false)
+		if tool.Description != "" {
+			converted.OfFunction.Description = param.NewOpt(tool.Description)
+		}
+		out = append(out, converted)
 	}
 	return out
 }
 
-func emitDeltas(onDelta func(harness.Delta), chunk openai.ChatCompletionChunk) {
-	if len(chunk.Choices) == 0 {
-		return
+func convertResponse(response *responses.Response) (*harness.ChatResult, error) {
+	if response == nil {
+		return nil, fmt.Errorf("nil response")
 	}
-	delta := chunk.Choices[0].Delta
-	if delta.Content != "" {
-		onDelta(harness.Delta{Text: delta.Content})
+	switch response.Status {
+	case responses.ResponseStatusCompleted, responses.ResponseStatusIncomplete:
+		// Converted below.
+	case responses.ResponseStatusFailed:
+		if response.Error.Message != "" {
+			return nil, fmt.Errorf("responses API: %s", response.Error.Message)
+		}
+		return nil, fmt.Errorf("responses API response failed")
+	default:
+		return nil, fmt.Errorf("responses API returned unexpected status %q", response.Status)
 	}
-	for _, tc := range delta.ToolCalls {
-		onDelta(harness.Delta{ToolCall: &harness.ToolCallDelta{
-			Index:     int(tc.Index),
-			ID:        tc.ID,
-			Name:      tc.Function.Name,
-			Arguments: tc.Function.Arguments,
-		}})
+
+	providerData, err := json.Marshal(providerData{ResponseID: response.ID})
+	if err != nil {
+		return nil, fmt.Errorf("encode OpenAI provider data: %w", err)
 	}
+	message := harness.Message{Role: harness.RoleAssistant, ProviderData: providerData}
+	var text strings.Builder
+	var thinking strings.Builder
+	refused := false
+	for _, item := range response.Output {
+		switch item.Type {
+		case "message":
+			for _, content := range item.AsMessage().Content {
+				switch content.Type {
+				case "output_text":
+					text.WriteString(content.Text)
+				case "refusal":
+					refused = true
+					text.WriteString(content.Refusal)
+				}
+			}
+		case "function_call":
+			call := item.AsFunctionCall()
+			message.ToolCalls = append(message.ToolCalls, harness.ToolCall{
+				ID:        call.CallID,
+				Name:      call.Name,
+				Arguments: json.RawMessage(call.Arguments),
+			})
+		case "reasoning":
+			for _, summary := range item.AsReasoning().Summary {
+				thinking.WriteString(summary.Text)
+			}
+		}
+	}
+	message.Content = text.String()
+	message.Thinking = thinking.String()
+
+	finishReason := harness.FinishReasonEndTurn
+	finishDetails := ""
+	switch {
+	case response.Status == responses.ResponseStatusIncomplete && response.IncompleteDetails.Reason == "max_output_tokens":
+		finishReason = harness.FinishReasonMaxTokens
+		finishDetails = response.IncompleteDetails.Reason
+	case response.Status == responses.ResponseStatusIncomplete:
+		finishReason = harness.FinishReasonIncomplete
+		finishDetails = response.IncompleteDetails.Reason
+	case refused:
+		finishReason = harness.FinishReasonRefusal
+		finishDetails = message.Content
+	case len(message.ToolCalls) > 0:
+		finishReason = harness.FinishReasonToolUse
+	}
+
+	result := &harness.ChatResult{
+		Message:       message,
+		ResponseID:    response.ID,
+		FinishReason:  finishReason,
+		FinishDetails: finishDetails,
+	}
+	if response.JSON.Usage.Valid() {
+		result.Usage = &harness.Usage{
+			InputTokens:       int(response.Usage.InputTokens),
+			CachedInputTokens: int(response.Usage.InputTokensDetails.CachedTokens),
+			OutputTokens:      int(response.Usage.OutputTokens),
+		}
+	}
+	return result, nil
 }
 
-func convertResponse(completion *openai.ChatCompletion) (*harness.ChatResult, error) {
-	if completion == nil {
-		return nil, fmt.Errorf("nil completion")
-	}
-	if len(completion.Choices) == 0 {
-		return nil, fmt.Errorf("completion had no choices")
-	}
-
-	choice := completion.Choices[0]
-	assistant := harness.Message{
-		Role:    harness.RoleAssistant,
-		Content: choice.Message.Content,
-	}
-
-	if len(choice.Message.ToolCalls) > 0 {
-		assistant.ToolCalls = make([]harness.ToolCall, 0, len(choice.Message.ToolCalls))
-		for _, toolCall := range choice.Message.ToolCalls {
-			assistant.ToolCalls = append(assistant.ToolCalls, harness.ToolCall{
-				ID:        toolCall.ID,
-				Name:      toolCall.Function.Name,
-				Arguments: json.RawMessage(toolCall.Function.Arguments),
-			})
+func findResponseID(messages []harness.Message, match string) (string, int, error) {
+	for i := len(messages) - 1; i >= 0; i-- {
+		responseID, err := messageResponseID(messages[i])
+		if err != nil {
+			return "", 0, err
+		}
+		if responseID != "" && (match == "" || responseID == match) {
+			return responseID, i + 1, nil
 		}
 	}
+	return match, 0, nil
+}
 
-	result := &harness.ChatResult{Message: assistant}
-	if completion.Usage.JSON.TotalTokens.Valid() {
-		result.Usage = &harness.Usage{
-			InputTokens:  int(completion.Usage.PromptTokens),
-			OutputTokens: int(completion.Usage.CompletionTokens),
-		}
+func messageResponseID(message harness.Message) (string, error) {
+	if message.Role != harness.RoleAssistant || len(message.ProviderData) == 0 {
+		return "", nil
 	}
+	var data providerData
+	if err := json.Unmarshal(message.ProviderData, &data); err != nil {
+		return "", fmt.Errorf("decode OpenAI provider data: %w", err)
+	}
+	return data.ResponseID, nil
+}
 
-	return result, nil
+func stringOption(options map[string]any, key string) (string, bool) {
+	if options == nil {
+		return "", false
+	}
+	value, exists := options[key]
+	if !exists {
+		return "", false
+	}
+	text, ok := value.(string)
+	return text, ok
 }
 
 func asFloat(v any) (float64, bool) {
