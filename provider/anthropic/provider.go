@@ -307,16 +307,18 @@ func convertResponse(msg *anthropic.Message) (*harness.ChatResult, error) {
 	}
 
 	assistant := harness.Message{Role: harness.RoleAssistant}
+	var textBlocks []string
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.TextBlock:
-			assistant.Content += b.Text
+			textBlocks = append(textBlocks, b.Text)
 		case anthropic.ThinkingBlock:
 			assistant.Thinking += b.Thinking
 		case anthropic.ToolUseBlock:
 			assistant.ToolCalls = append(assistant.ToolCalls, harness.ToolCall{ID: b.ID, Name: b.Name, Arguments: b.Input})
 		}
 	}
+	assistant.Content = strings.Join(textBlocks, "\n")
 	nativeMessage, err := json.Marshal(msg.ToParam())
 	if err != nil {
 		return nil, fmt.Errorf("encode Anthropic provider data: %w", err)

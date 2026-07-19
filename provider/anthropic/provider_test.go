@@ -241,6 +241,32 @@ func TestProviderStreamingAccumulationAndDeltas(t *testing.T) {
 	}
 }
 
+func TestProviderJoinsTextBlocksWithNewlines(t *testing.T) {
+	server := newAnthropicServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, sse("message_start", `{"type":"message_start","message":{"id":"msg_text_blocks","type":"message","role":"assistant","model":"claude-fable-5","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`))
+		_, _ = io.WriteString(w, sse("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`))
+		_, _ = io.WriteString(w, sse("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first block"}}`))
+		_, _ = io.WriteString(w, sse("content_block_stop", `{"type":"content_block_stop","index":0}`))
+		_, _ = io.WriteString(w, sse("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`))
+		_, _ = io.WriteString(w, sse("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"second block"}}`))
+		_, _ = io.WriteString(w, sse("content_block_stop", `{"type":"content_block_stop","index":1}`))
+		_, _ = io.WriteString(w, sse("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":2,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`))
+		_, _ = io.WriteString(w, sse("message_stop", `{"type":"message_stop"}`))
+	})
+	defer server.Close()
+
+	result, err := New(WithBaseURL(server.URL), WithAPIKey("test-key")).Chat(context.Background(), harness.ChatParams{
+		Messages: []harness.Message{{Role: harness.RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if result.Message.Content != "first block\nsecond block" {
+		t.Fatalf("message content = %q, want newline-separated blocks", result.Message.Content)
+	}
+}
+
 func TestProviderStreamingAndNonStreamingCallersAreEquivalent(t *testing.T) {
 	server := newAnthropicServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeTextStream(w, "msg_same", "claude-fable-5", "same", "end_turn", "null", basicUsageJSON)
