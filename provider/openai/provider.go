@@ -11,11 +11,11 @@ import (
 	"strings"
 
 	harness "github.com/lox/agent-harness"
-	openai "github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/packages/param"
-	"github.com/openai/openai-go/responses"
-	"github.com/openai/openai-go/shared"
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/param"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 // Provider implements harness.Provider using OpenAI's Responses API.
@@ -53,7 +53,7 @@ func WithDefaultModel(model string) Option {
 	return func(c *config) { c.defaultModel = model }
 }
 
-// WithRequestOption appends a raw openai-go request option.
+// WithRequestOption appends a raw openai-go/v3 request option.
 func WithRequestOption(opt option.RequestOption) Option {
 	return func(c *config) { c.requestOpts = append(c.requestOpts, opt) }
 }
@@ -211,13 +211,16 @@ func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNe
 		request.PreviousResponseID = param.NewOpt(previousResponseID)
 	}
 	if len(params.Tools) > 0 {
-		request.Tools = convertTools(params.Tools)
+		strictTools, _ := params.Options["strict_tools"].(bool)
+		request.Tools = convertTools(params.Tools, strictTools)
 	}
 
 	for key, value := range params.Options {
 		switch key {
 		case "previous_response_id":
 			// Applied above because it also controls history conversion.
+		case "strict_tools":
+			// Applied above while converting function tools.
 		case "prompt_cache_key":
 			if v, ok := value.(string); ok {
 				request.PromptCacheKey = param.NewOpt(v)
@@ -243,6 +246,17 @@ func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNe
 		case "parallel_tool_calls":
 			if v, ok := value.(bool); ok {
 				request.ParallelToolCalls = param.NewOpt(v)
+			}
+		case "response_format":
+			if v, ok := value.(string); ok {
+				switch v {
+				case "json_object":
+					format := shared.NewResponseFormatJSONObjectParam()
+					request.Text.Format = responses.ResponseFormatTextConfigUnionParam{OfJSONObject: &format}
+				case "text":
+					format := shared.NewResponseFormatTextParam()
+					request.Text.Format = responses.ResponseFormatTextConfigUnionParam{OfText: &format}
+				}
 			}
 		default:
 			log.Printf("harness/provider/openai: ignoring unknown option %q", key)
@@ -290,7 +304,7 @@ func convertMessages(system string, messages []harness.Message) (responses.Respo
 	return input, strings.Join(instructions, "\n\n"), nil
 }
 
-func convertTools(tools []harness.ToolDef) []responses.ToolUnionParam {
+func convertTools(tools []harness.ToolDef, strict bool) []responses.ToolUnionParam {
 	out := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, tool := range tools {
 		parameters := map[string]any{}
@@ -299,7 +313,7 @@ func convertTools(tools []harness.ToolDef) []responses.ToolUnionParam {
 				parameters = map[string]any{}
 			}
 		}
-		converted := responses.ToolParamOfFunction(tool.Name, parameters, false)
+		converted := responses.ToolParamOfFunction(tool.Name, parameters, strict)
 		if tool.Description != "" {
 			converted.OfFunction.Description = param.NewOpt(tool.Description)
 		}
