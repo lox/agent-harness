@@ -64,6 +64,7 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - [docs/architecture.md](docs/architecture.md) — API shape, loop lifecycle, and state model
 - [docs/runner.md](docs/runner.md) — optional helper for starting/stopping active runs
 - [docs/providers.md](docs/providers.md) — provider adapter contracts and type mappings
+- [docs/memory.md](docs/memory.md) — optional file-backed memory package, recall tools, and promotion primitives
 - [docs/research.md](docs/research.md) — research notes and design rationale
 
 The `docs/` directory is the source of truth for design and implementation guidance.
@@ -84,11 +85,12 @@ result, err := harness.Run(ctx, provider,
         return harness.ToolActionContinue, nil
     }),
 )
+if result != nil {
+    thread.Append(result)
+}
 if err != nil {
     return err
 }
-
-thread.Append(result)
 
 if result.StopReason == harness.StopPaused {
     // approval flow happens outside the harness
@@ -103,6 +105,12 @@ if result.StopReason == harness.StopPaused {
         harness.WithMessages(thread.Messages...),
         harness.WithTools(tools...),
     )
+    if result != nil {
+        thread.Append(result)
+    }
+    if err != nil {
+        return err
+    }
 }
 ```
 
@@ -133,7 +141,7 @@ done, err := r.Start(context.Background(), thread.ID, func(ctx context.Context) 
         harness.WithMessages(thread.Messages...),
         harness.WithTools(tools...),
     )
-    if err == nil {
+    if result != nil {
         thread.Append(result)
     }
     return err
@@ -157,6 +165,8 @@ _ = runErr
 OPENAI_API_KEY=... go run ./examples/claw
 ```
 
-Then type prompts or control commands (`/stop`, `/history`, `/tools`, `/quit`).
+Then type prompts or control commands (`/stop`, `/history`, `/tools`, `/memory`, `/remember <text>`, `/new`, `/quit`).
+The example enables file-backed memory by default at `~/.agent-harness/claw`;
+pass `--memory-dir ""` to disable it.
 
 See [docs/architecture.md](docs/architecture.md) for the primary implementation guide.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -398,6 +399,36 @@ func TestRunCancellationDuringProviderCall(t *testing.T) {
 	}
 }
 
+func TestRunCancellationDuringToolBalancesToolCalls(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &mockProvider{results: []*ChatResult{{
+		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{ID: "1", Name: "write"},
+			{ID: "2", Name: "write"},
+		}},
+	}}}
+	tool := Tool{ToolDef: ToolDef{Name: "write"}, Execute: func(ctx context.Context, _ ToolCall) (*ToolResult, error) {
+		cancel()
+		return nil, ctx.Err()
+	}}
+
+	res, err := Run(ctx, p, WithTools(tool))
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if res.StopReason != StopCancelled {
+		t.Fatalf("StopReason = %v, want %v", res.StopReason, StopCancelled)
+	}
+	if len(res.Messages) != 3 {
+		t.Fatalf("Messages = %+v, want assistant plus two tool results", res.Messages)
+	}
+	for i, msg := range res.Messages[1:] {
+		if msg.ToolResult == nil || !msg.ToolResult.IsError || msg.ToolResult.ToolCallID != fmt.Sprint(i+1) {
+			t.Fatalf("cancelled result %d = %+v", i, msg)
+		}
+	}
+}
+
 func TestRunRejectsInconsistentFinishReason(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -435,12 +466,15 @@ func TestRunRejectsInconsistentFinishReason(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Run(context.Background(), &mockProvider{results: []*ChatResult{tt.result}})
+			result, err := Run(context.Background(), &mockProvider{results: []*ChatResult{tt.result}})
 			if err == nil {
 				t.Fatal("Run() error = nil, want non-nil")
 			}
 			if !strings.Contains(err.Error(), "step 0") {
 				t.Fatalf("Run() error = %q, want step prefix", err.Error())
+			}
+			if len(result.Messages) != 0 {
+				t.Fatalf("Run() retained invalid provider message: %+v", result.Messages)
 			}
 		})
 	}
@@ -480,7 +514,7 @@ func TestRunToolFilterControlsExposedTools(t *testing.T) {
 
 func TestRunPropagatesAfterToolError(t *testing.T) {
 	p := &mockProvider{results: []*ChatResult{{
-		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "echo"}}},
+		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "echo"}, {ID: "2", Name: "echo"}}},
 	}}}
 
 	tool := Tool{ToolDef: ToolDef{Name: "echo"}, Execute: func(_ context.Context, _ ToolCall) (*ToolResult, error) {
@@ -488,11 +522,17 @@ func TestRunPropagatesAfterToolError(t *testing.T) {
 	}}
 
 	wantErr := errors.New("after tool failed")
-	_, err := Run(context.Background(), p, WithTools(tool), WithAfterTool(func(_ context.Context, _ ToolCall, _ *ToolResult) error {
+	res, err := Run(context.Background(), p, WithTools(tool), WithAfterTool(func(_ context.Context, _ ToolCall, _ *ToolResult) error {
 		return wantErr
 	}))
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Run() error = %v, want %v", err, wantErr)
+	}
+	if res.StopReason != StopError {
+		t.Fatalf("StopReason = %v, want %v", res.StopReason, StopError)
+	}
+	if len(res.Messages) != 3 || res.Messages[1].ToolResult.Content != "ok" || !res.Messages[2].ToolResult.IsError {
+		t.Fatalf("partial result = %+v, want completed call and unexecuted call result", res)
 	}
 }
 
@@ -578,7 +618,7 @@ func TestRunProviderNilResultReturnsError(t *testing.T) {
 
 func TestRunBeforeToolErrorIsReturned(t *testing.T) {
 	p := &mockProvider{results: []*ChatResult{{
-		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "echo"}}},
+		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "echo"}, {ID: "2", Name: "echo"}}},
 	}}}
 
 	tool := Tool{ToolDef: ToolDef{Name: "echo"}, Execute: func(_ context.Context, _ ToolCall) (*ToolResult, error) {
@@ -586,7 +626,7 @@ func TestRunBeforeToolErrorIsReturned(t *testing.T) {
 	}}
 	wantErr := errors.New("approval backend unavailable")
 
-	_, err := Run(context.Background(), p,
+	res, err := Run(context.Background(), p,
 		WithTools(tool),
 		WithBeforeTool(func(_ context.Context, _ ToolCall) (ToolAction, error) {
 			return ToolActionContinue, wantErr
@@ -594,6 +634,32 @@ func TestRunBeforeToolErrorIsReturned(t *testing.T) {
 	)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Run() error = %v, want %v", err, wantErr)
+	}
+	if res.StopReason != StopError {
+		t.Fatalf("StopReason = %v, want %v", res.StopReason, StopError)
+	}
+	if len(res.Messages) != 3 || !res.Messages[1].ToolResult.IsError || !res.Messages[2].ToolResult.IsError {
+		t.Fatalf("partial result = %+v, want balanced unexecuted results", res)
+	}
+}
+
+func TestRunRejectsInvalidBeforeToolAction(t *testing.T) {
+	p := &mockProvider{results: []*ChatResult{{
+		Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "1", Name: "echo"}}},
+	}}}
+	tool := Tool{ToolDef: ToolDef{Name: "echo"}, Execute: func(_ context.Context, _ ToolCall) (*ToolResult, error) {
+		t.Fatal("tool executed for invalid action")
+		return nil, nil
+	}}
+
+	res, err := Run(context.Background(), p, WithTools(tool), WithBeforeTool(func(_ context.Context, _ ToolCall) (ToolAction, error) {
+		return ToolAction(99), nil
+	}))
+	if err == nil || !strings.Contains(err.Error(), "invalid action 99") {
+		t.Fatalf("Run() error = %v, want invalid action", err)
+	}
+	if len(res.Messages) != 2 || res.Messages[1].ToolResult == nil || !res.Messages[1].ToolResult.IsError {
+		t.Fatalf("result = %+v, want balanced tool error", res)
 	}
 }
 

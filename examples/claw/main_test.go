@@ -5,10 +5,13 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	harness "github.com/lox/agent-harness"
+	mem "github.com/lox/agent-harness/memory"
 	"github.com/lox/agent-harness/runner"
 )
 
@@ -58,6 +61,52 @@ func TestHandleCommandStopCancelsActiveRun(t *testing.T) {
 	}
 }
 
+func TestHandleCommandRememberWritesMemory(t *testing.T) {
+	store, err := mem.New(t.TempDir(), mem.WithClock(func() time.Time {
+		return time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	}))
+	if err != nil {
+		t.Fatalf("memory.New() error = %v", err)
+	}
+	a := &app{memory: store}
+
+	out := captureStdout(t, func() {
+		handled, quit := a.handleCommand("/remember Prefer direct answers")
+		if !handled || quit {
+			t.Fatalf("unexpected command result handled=%v quit=%v", handled, quit)
+		}
+	})
+	if !strings.Contains(out, "wrote memory/2026-05-23.md") {
+		t.Fatalf("expected memory write output, got %q", out)
+	}
+
+	content, err := os.ReadFile(storeFile(t, store, "memory/2026-05-23.md"))
+	if err != nil {
+		t.Fatalf("read memory file: %v", err)
+	}
+	if !strings.Contains(string(content), "Prefer direct answers") {
+		t.Fatalf("memory content = %s", content)
+	}
+}
+
+func TestHandleCommandRememberWithoutTextShowsUsage(t *testing.T) {
+	store, err := mem.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("memory.New() error = %v", err)
+	}
+	a := &app{memory: store}
+
+	out := captureStdout(t, func() {
+		handled, quit := a.handleCommand("/remember")
+		if !handled || quit {
+			t.Fatalf("unexpected command result handled=%v quit=%v", handled, quit)
+		}
+	})
+	if !strings.Contains(out, "usage: /remember <text>") {
+		t.Fatalf("expected remember usage, got %q", out)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 
@@ -80,4 +129,10 @@ func captureStdout(t *testing.T, fn func()) string {
 	_ = r.Close()
 
 	return buf.String()
+}
+
+func storeFile(t *testing.T, store *mem.Store, relPath string) string {
+	t.Helper()
+
+	return filepath.Join(store.WorkspaceDir(), filepath.FromSlash(relPath))
 }

@@ -19,7 +19,8 @@ agent-harness/
 ├── thread.go
 ├── loop.go
 ├── event.go
-└── option.go
+├── option.go
+└── memory/
 ```
 
 ## Core Types
@@ -84,6 +85,11 @@ accounting model rather than sum every cache field together.
 9. Apply `WithAfterTool`
 10. Repeat until a terminal state, hook pause, cancellation, or max-steps
 
+Once a provider response has been recorded, `Run` returns the partial `Result`
+alongside any later error. Cancelled calls and calls abandoned by a failing hook
+receive error tool results so the transcript remains valid. Callers that persist
+threads should append a non-nil result before handling the error.
+
 ## Stop Reasons
 
 - `StopEndTurn`: assistant returned no tool calls
@@ -93,6 +99,8 @@ accounting model rather than sum every cache field together.
 - `StopRefusal`: provider refused the request; details remain in `Result.FinishDetails`
 - `StopIncomplete`: provider returned `max_tokens` or another incomplete state;
   the exact state remains in `Result.FinishReason`
+- `StopError`: the run returned an error after producing a partial, persistable
+  result
 
 Provider continuation is not a stop reason. It consumes a step and continues
 inside `Run`, so repeated continuation responses eventually return
@@ -105,7 +113,8 @@ response ID and `Result.FinishReason` retains the last observed provider state.
 
 - `AddUser(content)` appends user input
 - `Append(result)` appends run outputs and updates pending calls
-- `ResolvePending(ctx, fn)` executes pending calls and appends tool result messages
+- `ResolvePending(ctx, fn)` commits each successful call immediately, so a later
+  failure leaves only the unexecuted calls pending
 
 ## Event Model
 
@@ -126,3 +135,21 @@ Event payloads are emitted from stable value copies to avoid pointer mutation is
 - tools must have unique non-empty names
 - tools must have a non-nil `Execute`
 - filtered tool sets are revalidated per-step
+- before-tool hooks must return a defined `ToolAction`; unknown values fail closed
+
+## Optional Memory Package
+
+The core harness remains storage-agnostic. The optional `memory` package adds a
+file-backed memory layer that applications can compose into their own prompts
+and tools.
+
+- `MEMORY.md` is curated long-term memory.
+- `memory/*.md` contains dated working memory and session captures.
+- `Store.Bootstrap` appends the memory prompt section to the system prompt.
+- `Store.Tools` exposes `memory_search` and `memory_get`.
+- `CaptureThread` and `CaptureMessages` support `/new`, `/reset`, and
+  pre-compaction flush flows.
+- `PromotionCandidates`, `ApplyPromotions`, and `NewConsolidator` provide a
+  reviewable consolidation path from recalled working memory into `MEMORY.md`.
+
+See [memory.md](memory.md) for usage details.
