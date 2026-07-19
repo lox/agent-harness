@@ -168,7 +168,7 @@ func TestRunContinuesWhenProviderRequestsContinuation(t *testing.T) {
 		},
 	}}
 
-	res, err := Run(context.Background(), p)
+	res, err := Run(context.Background(), p, WithPreviousResponseID("response-before-run"))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -190,9 +190,15 @@ func TestRunContinuesWhenProviderRequestsContinuation(t *testing.T) {
 	if res.FinishReason != FinishReasonEndTurn {
 		t.Fatalf("FinishReason = %q, want %q", res.FinishReason, FinishReasonEndTurn)
 	}
+	if p.calls[0].PreviousResponseID != "response-before-run" || p.calls[1].PreviousResponseID != "" {
+		t.Fatalf("PreviousResponseID by call = %q, %q", p.calls[0].PreviousResponseID, p.calls[1].PreviousResponseID)
+	}
+	if len(res.CallUsage) != 2 || res.CallUsage[0] != (Usage{}) || res.CallUsage[1] != (Usage{}) {
+		t.Fatalf("CallUsage = %+v, want two zero values for omitted usage", res.CallUsage)
+	}
 }
 
-func TestRunAggregatesCacheAwareUsage(t *testing.T) {
+func TestRunRetainsAndAggregatesCacheAwareUsage(t *testing.T) {
 	p := &mockProvider{results: []*ChatResult{
 		{
 			Message:      Message{Role: RoleAssistant, Content: "continuing"},
@@ -237,6 +243,32 @@ func TestRunAggregatesCacheAwareUsage(t *testing.T) {
 	}
 	if !reflect.DeepEqual(res.TotalUsage, want) {
 		t.Fatalf("TotalUsage = %+v, want %+v", res.TotalUsage, want)
+	}
+	wantCalls := []Usage{
+		{
+			InputTokens:                10,
+			OutputTokens:               2,
+			CachedInputTokens:          3,
+			CacheCreationInputTokens:   4,
+			CacheReadInputTokens:       5,
+			CacheCreation5mInputTokens: 6,
+			CacheCreation1hInputTokens: 7,
+		},
+		{
+			InputTokens:                20,
+			OutputTokens:               8,
+			CachedInputTokens:          30,
+			CacheCreationInputTokens:   40,
+			CacheReadInputTokens:       50,
+			CacheCreation5mInputTokens: 60,
+			CacheCreation1hInputTokens: 70,
+		},
+	}
+	if !reflect.DeepEqual(res.CallUsage, wantCalls) {
+		t.Fatalf("CallUsage = %+v, want %+v", res.CallUsage, wantCalls)
+	}
+	if len(res.CallUsage) != res.Steps {
+		t.Fatalf("len(CallUsage) = %d, Steps = %d", len(res.CallUsage), res.Steps)
 	}
 }
 

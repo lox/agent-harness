@@ -33,11 +33,11 @@ func TestProviderChatRequestAndDetailedResult(t *testing.T) {
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
 		}},
 		Options: map[string]any{
-			"reasoning_effort": "xhigh",
-			"max_tokens":       32768,
-			"cache_ttl":        "1h",
-			"thinking_budget":  4096,
+			"max_tokens":      32768,
+			"cache_ttl":       "1h",
+			"thinking_budget": 4096,
 		},
+		Reasoning: harness.ReasoningOptions{Effort: "xhigh"},
 	})
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
@@ -338,17 +338,26 @@ func TestProviderPauseTurnContinuesThroughRun(t *testing.T) {
 	server := newAnthropicServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		request := decodeRequest(t, r)
+		if got := nestedString(t, request, "cache_control", "type"); got != "ephemeral" {
+			t.Fatalf("request %d cache control type = %q", requestCount, got)
+		}
+		if got := nestedString(t, request, "cache_control", "ttl"); got != "1h" {
+			t.Fatalf("request %d cache ttl = %q", requestCount, got)
+		}
 		if requestCount == 1 {
-			writeTextStream(w, "msg_pause", "claude-fable-5", "working", "pause_turn", "null", basicUsageJSON)
+			writeTextStream(w, "msg_pause", "claude-fable-5", "working", "pause_turn", "null", firstDetailedUsageJSON)
 			return
 		}
 		continuationRequest = request
-		writeTextStream(w, "msg_final", "claude-fable-5", "complete", "end_turn", "null", basicUsageJSON)
+		writeTextStream(w, "msg_final", "claude-fable-5", "complete", "end_turn", "null", secondDetailedUsageJSON)
 	})
 	defer server.Close()
 
 	p := New(WithBaseURL(server.URL), WithAPIKey("test-key"))
-	result, err := harness.Run(context.Background(), p, harness.WithMessages(harness.Message{Role: harness.RoleUser, Content: "analyze"}))
+	result, err := harness.Run(context.Background(), p,
+		harness.WithMessages(harness.Message{Role: harness.RoleUser, Content: "analyze"}),
+		harness.WithProviderOptions(map[string]any{"cache_ttl": "1h"}),
+	)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -358,8 +367,16 @@ func TestProviderPauseTurnContinuesThroughRun(t *testing.T) {
 	if result.StopReason != harness.StopEndTurn || result.FinishReason != harness.FinishReasonEndTurn || result.ResponseID != "msg_final" {
 		t.Fatalf("terminal result = stop %v, finish %q, ID %q", result.StopReason, result.FinishReason, result.ResponseID)
 	}
-	if result.TotalUsage.InputTokens != 4 || result.TotalUsage.OutputTokens != 2 {
-		t.Fatalf("total usage = %+v", result.TotalUsage)
+	wantCalls := []harness.Usage{
+		{InputTokens: 2, OutputTokens: 1, CachedInputTokens: 4, CacheCreationInputTokens: 3, CacheReadInputTokens: 4, CacheCreation5mInputTokens: 2, CacheCreation1hInputTokens: 1},
+		{InputTokens: 5, OutputTokens: 6, CachedInputTokens: 8, CacheCreationInputTokens: 7, CacheReadInputTokens: 8, CacheCreation5mInputTokens: 3, CacheCreation1hInputTokens: 4},
+	}
+	if !reflect.DeepEqual(result.CallUsage, wantCalls) {
+		t.Fatalf("call usage = %+v, want %+v", result.CallUsage, wantCalls)
+	}
+	wantTotal := harness.Usage{InputTokens: 7, OutputTokens: 7, CachedInputTokens: 12, CacheCreationInputTokens: 10, CacheReadInputTokens: 12, CacheCreation5mInputTokens: 5, CacheCreation1hInputTokens: 5}
+	if !reflect.DeepEqual(result.TotalUsage, wantTotal) {
+		t.Fatalf("total usage = %+v, want %+v", result.TotalUsage, wantTotal)
 	}
 
 	messages := objectSlice(t, continuationRequest, "messages")
@@ -519,3 +536,7 @@ func sse(event, data string) string {
 const basicUsageJSON = `{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`
 
 const detailedUsageJSON = `{"input_tokens":11,"output_tokens":7,"cache_creation_input_tokens":30,"cache_read_input_tokens":40,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":10}}`
+
+const firstDetailedUsageJSON = `{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":3,"cache_read_input_tokens":4,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":1}}`
+
+const secondDetailedUsageJSON = `{"input_tokens":5,"output_tokens":6,"cache_creation_input_tokens":7,"cache_read_input_tokens":8,"cache_creation":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":4}}`

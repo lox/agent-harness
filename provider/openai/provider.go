@@ -170,7 +170,12 @@ func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNe
 		return responses.ResponseNewParams{}, fmt.Errorf("model is required")
 	}
 
-	previousResponseID, explicitContinuation := stringOption(params.Options, "previous_response_id")
+	previousResponseID := params.PreviousResponseID
+	explicitContinuation := previousResponseID != ""
+	if optionResponseID, ok := stringOption(params.Options, "previous_response_id"); ok && !explicitContinuation {
+		previousResponseID = optionResponseID
+		explicitContinuation = true
+	}
 	start := 0
 	if explicitContinuation && previousResponseID != "" {
 		var err error
@@ -215,6 +220,7 @@ func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNe
 		request.Tools = convertTools(params.Tools, strictTools)
 	}
 
+	reasoning := params.Reasoning
 	for key, value := range params.Options {
 		switch key {
 		case "previous_response_id":
@@ -226,10 +232,12 @@ func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNe
 				request.PromptCacheKey = param.NewOpt(v)
 			}
 		case "reasoning_effort":
-			if v, ok := value.(string); ok {
-				// Use the string-backed SDK type so new values such as xhigh remain
-				// available even when the generated SDK constants lag the API.
-				request.Reasoning.Effort = shared.ReasoningEffort(v)
+			if v, ok := value.(string); ok && reasoning.Effort == "" {
+				reasoning.Effort = v
+			}
+		case "reasoning_mode":
+			if v, ok := value.(string); ok && reasoning.Mode == "" {
+				reasoning.Mode = v
 			}
 		case "max_output_tokens", "max_tokens":
 			if v, ok := asInt64(value); ok {
@@ -261,6 +269,14 @@ func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNe
 		default:
 			log.Printf("harness/provider/openai: ignoring unknown option %q", key)
 		}
+	}
+	if reasoning.Effort != "" {
+		// Use the string-backed SDK type so new values remain available even
+		// when the generated SDK constants lag the API.
+		request.Reasoning.Effort = shared.ReasoningEffort(reasoning.Effort)
+	}
+	if reasoning.Mode != "" {
+		request.Reasoning.Mode = shared.ReasoningMode(reasoning.Mode)
 	}
 
 	return request, nil
@@ -401,10 +417,15 @@ func convertResponse(response *responses.Response) (*harness.ChatResult, error) 
 		FinishDetails: finishDetails,
 	}
 	if response.JSON.Usage.Valid() {
+		cachedInput := response.Usage.InputTokensDetails.CachedTokens
+		cacheWrite := response.Usage.InputTokensDetails.CacheWriteTokens
+		ordinaryInput := max(response.Usage.InputTokens-cachedInput-cacheWrite, 0)
 		result.Usage = &harness.Usage{
-			InputTokens:       int(response.Usage.InputTokens),
-			CachedInputTokens: int(response.Usage.InputTokensDetails.CachedTokens),
-			OutputTokens:      int(response.Usage.OutputTokens),
+			InputTokens:              int(ordinaryInput),
+			OutputTokens:             int(response.Usage.OutputTokens),
+			CachedInputTokens:        int(cachedInput),
+			CacheCreationInputTokens: int(cacheWrite),
+			CacheReadInputTokens:     int(cachedInput),
 		}
 	}
 	return result, nil

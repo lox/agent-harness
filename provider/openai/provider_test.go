@@ -132,7 +132,7 @@ func TestProviderRequestMapsHistoryToolsAndOptions(t *testing.T) {
 	if result.FinishReason != harness.FinishReasonEndTurn {
 		t.Fatalf("finish reason = %q", result.FinishReason)
 	}
-	if result.Usage == nil || result.Usage.InputTokens != 17 || result.Usage.CachedInputTokens != 9 || result.Usage.OutputTokens != 11 {
+	if result.Usage == nil || result.Usage.InputTokens != 8 || result.Usage.CachedInputTokens != 9 || result.Usage.CacheReadInputTokens != 9 || result.Usage.OutputTokens != 11 {
 		t.Fatalf("usage = %+v", result.Usage)
 	}
 }
@@ -145,16 +145,23 @@ func TestRunContinuesWithPreviousResponseIDAndFunctionOutput(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
+		if got := body["prompt_cache_key"]; got != "deep-analysis-run" {
+			t.Fatalf("request %d prompt_cache_key = %#v", call, got)
+		}
+		reasoning := body["reasoning"].(map[string]any)
+		if reasoning["mode"] != "pro" || reasoning["effort"] != "xhigh" {
+			t.Fatalf("request %d reasoning = %#v", call, reasoning)
+		}
 
 		switch call {
 		case 1:
 			if got := body["instructions"]; got != "stay concise" {
 				t.Fatalf("first instructions = %#v", got)
 			}
-			if _, ok := body["previous_response_id"]; ok {
-				t.Fatalf("first request has previous_response_id: %#v", body)
+			if got := body["previous_response_id"]; got != "resp_existing" {
+				t.Fatalf("first previous_response_id = %#v, want resp_existing", got)
 			}
-			writeJSON(t, w, toolCallResponse("resp_1", "call_1", "echo", `{"text":"hi"}`))
+			writeJSON(t, w, toolCallResponseWithUsage("resp_1", "call_1", "echo", `{"text":"hi"}`, 60, 10, 20, 5))
 		case 2:
 			if got := body["instructions"]; got != "stay concise" {
 				t.Fatalf("continuation instructions = %#v", got)
@@ -170,7 +177,7 @@ func TestRunContinuesWithPreviousResponseIDAndFunctionOutput(t *testing.T) {
 			if output["type"] != "function_call_output" || output["call_id"] != "call_1" || output["output"] != "echoed: hi" {
 				t.Fatalf("continuation output = %#v", output)
 			}
-			writeJSON(t, w, completedTextResponse("resp_2", "finished", 4, 2, 3))
+			writeJSON(t, w, completedTextResponseWithUsage("resp_2", "finished", 120, 40, 30, 8))
 		default:
 			t.Fatalf("unexpected request %d", call)
 		}
@@ -181,6 +188,10 @@ func TestRunContinuesWithPreviousResponseIDAndFunctionOutput(t *testing.T) {
 	result, err := harness.Run(context.Background(), p,
 		harness.WithSystem("stay concise"),
 		harness.WithMessages(harness.Message{Role: harness.RoleUser, Content: "echo hi"}),
+		harness.WithModel("gpt-5.6"),
+		harness.WithPreviousResponseID("resp_existing"),
+		harness.WithReasoning(harness.ReasoningOptions{Effort: "xhigh", Mode: "pro"}),
+		harness.WithProviderOptions(map[string]any{"prompt_cache_key": "deep-analysis-run"}),
 		harness.WithTools(harness.Tool{
 			ToolDef: harness.ToolDef{Name: "echo", Parameters: json.RawMessage(`{"type":"object"}`)},
 			Execute: func(_ context.Context, call harness.ToolCall) (*harness.ToolResult, error) {
@@ -200,8 +211,16 @@ func TestRunContinuesWithPreviousResponseIDAndFunctionOutput(t *testing.T) {
 	if len(result.Messages) != 3 || messageResponseIDForTest(t, result.Messages[0]) != "resp_1" || messageResponseIDForTest(t, result.Messages[2]) != "resp_2" {
 		t.Fatalf("messages = %+v", result.Messages)
 	}
-	if result.TotalUsage.CachedInputTokens != 2 {
-		t.Fatalf("total usage = %+v", result.TotalUsage)
+	wantCalls := []harness.Usage{
+		{InputTokens: 30, OutputTokens: 5, CachedInputTokens: 10, CacheCreationInputTokens: 20, CacheReadInputTokens: 10},
+		{InputTokens: 50, OutputTokens: 8, CachedInputTokens: 40, CacheCreationInputTokens: 30, CacheReadInputTokens: 40},
+	}
+	if !reflect.DeepEqual(result.CallUsage, wantCalls) {
+		t.Fatalf("call usage = %+v, want %+v", result.CallUsage, wantCalls)
+	}
+	wantTotal := harness.Usage{InputTokens: 80, OutputTokens: 13, CachedInputTokens: 50, CacheCreationInputTokens: 50, CacheReadInputTokens: 50}
+	if !reflect.DeepEqual(result.TotalUsage, wantTotal) {
+		t.Fatalf("total usage = %+v, want %+v", result.TotalUsage, wantTotal)
 	}
 }
 
@@ -452,6 +471,26 @@ func toolCallResponse(id, callID, name, arguments string) string {
 		"output":[{"type":"function_call","id":"fc_1","status":"completed","call_id":%q,"name":%q,"arguments":%q}],
 		"usage":{"input_tokens":3,"input_tokens_details":{"cached_tokens":0},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":5}
 	}`, id, callID, name, arguments)
+}
+
+func toolCallResponseWithUsage(id, callID, name, arguments string, input, cached, cacheWrite, output int) string {
+	return fmt.Sprintf(`{
+		"id":%q,
+		"object":"response",
+		"status":"completed",
+		"output":[{"type":"function_call","id":"fc_1","status":"completed","call_id":%q,"name":%q,"arguments":%q}],
+		"usage":{"input_tokens":%d,"input_tokens_details":{"cached_tokens":%d,"cache_write_tokens":%d},"output_tokens":%d,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":%d}
+	}`, id, callID, name, arguments, input, cached, cacheWrite, output, input+output)
+}
+
+func completedTextResponseWithUsage(id, text string, input, cached, cacheWrite, output int) string {
+	return fmt.Sprintf(`{
+		"id":%q,
+		"object":"response",
+		"status":"completed",
+		"output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":%q,"annotations":[]}]}],
+		"usage":{"input_tokens":%d,"input_tokens_details":{"cached_tokens":%d,"cache_write_tokens":%d},"output_tokens":%d,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":%d}
+	}`, id, text, input, cached, cacheWrite, output, input+output)
 }
 
 func combinedResponse(id, callID, name, arguments, text string) string {

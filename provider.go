@@ -11,15 +11,24 @@ type Provider interface {
 
 // ChatParams contains everything needed for an LLM call.
 type ChatParams struct {
-	Model    string         // model name
-	System   string         // system prompt
-	Messages []Message      // conversation history
-	Tools    []ToolDef      // available tool definitions
-	Options  map[string]any // provider-specific options (temperature, max_tokens, etc.)
+	Model              string           // model name
+	System             string           // system prompt
+	Messages           []Message        // conversation history
+	Tools              []ToolDef        // available tool definitions
+	PreviousResponseID string           // provider response to continue, if supported
+	Reasoning          ReasoningOptions // provider-neutral reasoning controls
+	Options            map[string]any   // provider-specific options (temperature, max_tokens, etc.)
 
 	// Optional: called with streaming deltas as they arrive.
 	// If nil, the provider should still return the complete response.
 	OnDelta func(Delta)
+}
+
+// ReasoningOptions configures model reasoning independently of a provider SDK.
+// Providers map the fields they support and ignore unsupported fields.
+type ReasoningOptions struct {
+	Effort string `json:"effort,omitempty"`
+	Mode   string `json:"mode,omitempty"`
 }
 
 // ChatResult is what the provider returns.
@@ -46,7 +55,16 @@ const (
 	FinishReasonContinuation FinishReason = "continuation"
 )
 
-// Usage tracks token consumption.
+// Usage tracks mutually exclusive, priceable token categories for one or more
+// provider calls. InputTokens excludes cache reads and cache creation when the
+// provider reports those categories separately. CachedInputTokens is the
+// normalized cache-read total; CacheReadInputTokens preserves the provider's
+// cache-read terminology and normally has the same value.
+//
+// CacheCreationInputTokens is the aggregate number of tokens written to cache.
+// CacheCreation5mInputTokens and CacheCreation1hInputTokens are subdivisions of
+// that aggregate, so callers must not add them to it. OutputTokens is the
+// provider's inclusive output total, including reasoning tokens when applicable.
 type Usage struct {
 	InputTokens                int `json:"input_tokens"`
 	OutputTokens               int `json:"output_tokens"`

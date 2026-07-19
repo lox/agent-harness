@@ -36,7 +36,9 @@ agent-harness/
 ### Provider Contract
 
 - `Provider` exposes one method: `Chat(context.Context, ChatParams) (*ChatResult, error)`
-- `ChatParams` includes model, system prompt, history, tool definitions, provider options, and optional streaming callback
+- `ChatParams` includes model, system prompt, history, tool definitions,
+  provider-neutral reasoning controls, provider options, and an optional
+  streaming callback
 - `ChatResult` includes the assistant message, provider response ID, finish
   reason and details, and optional usage
 
@@ -57,12 +59,30 @@ presence of tool calls. Unknown reasons and inconsistent states such as
 `end_turn` with tool calls return an error, so explicit refusal or incomplete
 output can never become `StopEndTurn` silently.
 
-`Usage` keeps the provider's input and output counts alongside cached input,
-cache creation, and cache read counts. The 5-minute and 1-hour creation fields
-are details within the cache creation total rather than extra tokens to add to
-it. Providers that expose both a normalized cached-input total and a cache-read
-counter may populate both; callers should use the field appropriate to their
-accounting model rather than sum every cache field together.
+`Usage` splits tokens into priceable categories. `InputTokens` is ordinary,
+uncached input; `CachedInputTokens` is the normalized cache-read count;
+`CacheCreationInputTokens` is the aggregate cache-write count; and
+`OutputTokens` is the provider's inclusive output total. OpenAI's
+`cache_write_tokens` maps to cache creation, while Anthropic's 5-minute and
+1-hour creation counts remain subdivisions of the aggregate rather than extra
+tokens to add to it. `CacheReadInputTokens` preserves provider cache-read
+terminology and normally equals `CachedInputTokens`, so those two fields must
+not be summed.
+
+`Result.CallUsage` contains one `Usage` value for each completed provider call,
+in step order, and `Result.TotalUsage` is their field-wise sum. Price each
+`CallUsage` entry independently when a provider applies thresholds or
+multipliers per response, then add the resulting costs. A zero entry means the
+provider omitted usage for that step.
+
+`ReasoningOptions` provides shared `Effort` and `Mode` fields through
+`WithReasoning`. Providers map the fields they support. These generic values
+take precedence over compatibility keys in `WithProviderOptions`.
+
+`WithPreviousResponseID` resumes provider-owned response state on the first
+call of a run. Later calls leave that option empty and continue through the
+response IDs stored in newly appended assistant messages, so an external ID is
+never replayed over a newer continuation.
 
 ### Tool Model
 
@@ -77,7 +97,8 @@ accounting model rather than sum every cache field together.
 1. Validate options and seed message history
 2. Select active tools (optionally via `WithToolFilter`)
 3. Call provider with `ChatParams`
-4. Append assistant message and emit events
+4. Retain that call's usage, add it to total usage, append the assistant
+   message, and emit events
 5. Interpret the provider finish reason
 6. On `end_turn`, `refusal`, or incomplete output, return the matching stop state
 7. On `continuation`, append the assistant message unchanged and call the provider again

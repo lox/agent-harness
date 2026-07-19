@@ -125,7 +125,7 @@ func (p *Provider) buildRequest(params harness.ChatParams) (anthropic.MessageNew
 
 	cacheEnabled := true
 	var thinkingBudget int64
-	var reasoningEffort string
+	reasoningEffort := params.Reasoning.Effort
 	var outputEffort string
 	for key, value := range params.Options {
 		switch key {
@@ -150,7 +150,7 @@ func (p *Provider) buildRequest(params harness.ChatParams) (anthropic.MessageNew
 				thinkingBudget = v
 			}
 		case "reasoning_effort":
-			if v, ok := value.(string); ok {
+			if v, ok := value.(string); ok && reasoningEffort == "" {
 				reasoningEffort = v
 			}
 		case "output_effort":
@@ -327,9 +327,9 @@ func convertResponse(msg *anthropic.Message) (*harness.ChatResult, error) {
 
 	cacheCreation5m := int(msg.Usage.CacheCreation.Ephemeral5mInputTokens)
 	cacheCreation1h := int(msg.Usage.CacheCreation.Ephemeral1hInputTokens)
-	cacheCreation := cacheCreation5m + cacheCreation1h
+	cacheCreation := int(msg.Usage.CacheCreationInputTokens)
 	if cacheCreation == 0 {
-		cacheCreation = int(msg.Usage.CacheCreationInputTokens)
+		cacheCreation = cacheCreation5m + cacheCreation1h
 	}
 
 	result := &harness.ChatResult{
