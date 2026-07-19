@@ -67,6 +67,11 @@ This research explains why we made the harness choices; the implemented design i
 - Separating model-facing and user-facing tool output improves reliability and operator UX (`ToolResult.Content` vs `UserContent` and metadata).
 - Pause/resume must be explicit and serialisable for approvals; `StopPaused` + `PendingToolCalls` + `Thread.ResolvePending` keeps this state machine simple.
 - The harness stays stateless and storage-agnostic so apps can compose their own persistence and policy layers cleanly.
+- Memory should keep human-readable files as the durable source of truth, with
+  search indexes treated as rebuildable acceleration. The optional `memory`
+  package follows OpenClaw's split between curated `MEMORY.md`, dated working
+  notes, recall tools, capture hooks, and reviewable promotion from recalled
+  working memory.
 
 ## Operational Guidance From Research
 

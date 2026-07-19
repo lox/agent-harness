@@ -34,8 +34,9 @@ func (t *Thread) Append(r *Result) {
 	t.PendingToolCalls = append([]ToolCall(nil), r.PendingToolCalls...)
 }
 
-// ResolvePending executes pending tool calls, appends the results as RoleTool
-// messages, and clears pending state.
+// ResolvePending executes pending tool calls and appends each successful result
+// as a RoleTool message. If a later call fails, completed calls stay recorded
+// and only the unexecuted calls remain pending.
 func (t *Thread) ResolvePending(ctx context.Context, fn func(ctx context.Context, call ToolCall) (*ToolResult, error)) error {
 	if len(t.PendingToolCalls) == 0 {
 		return nil
@@ -44,8 +45,8 @@ func (t *Thread) ResolvePending(ctx context.Context, fn func(ctx context.Context
 		return errors.New("resolve pending function cannot be nil")
 	}
 
-	resolved := make([]Message, 0, len(t.PendingToolCalls))
-	for _, call := range t.PendingToolCalls {
+	for len(t.PendingToolCalls) > 0 {
+		call := t.PendingToolCalls[0]
 		result, err := fn(ctx, call)
 		if err != nil {
 			return err
@@ -53,13 +54,11 @@ func (t *Thread) ResolvePending(ctx context.Context, fn func(ctx context.Context
 		if result == nil {
 			return errors.New("resolve pending returned nil result")
 		}
-		if result.ToolCallID == "" {
-			result.ToolCallID = call.ID
-		}
-		resolved = append(resolved, Message{Role: RoleTool, ToolResult: result})
+		stored := cloneToolResult(result)
+		stored.ToolCallID = call.ID
+		t.Messages = append(t.Messages, Message{Role: RoleTool, ToolResult: stored})
+		t.PendingToolCalls = t.PendingToolCalls[1:]
 	}
-
-	t.Messages = append(t.Messages, resolved...)
 	t.PendingToolCalls = nil
 	return nil
 }

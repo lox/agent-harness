@@ -8,11 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	harness "github.com/lox/agent-harness"
+	mem "github.com/lox/agent-harness/memory"
 	openai "github.com/lox/agent-harness/provider/openai"
 	"github.com/lox/agent-harness/runner"
 )
@@ -26,6 +28,7 @@ type app struct {
 	runner   *runner.Runner
 	thread   *harness.Thread
 	tools    []harness.Tool
+	memory   *mem.Store
 
 	system   string
 	model    string
@@ -38,13 +41,34 @@ func main() {
 	modelFlag := flag.String("model", envOrDefault("OPENAI_MODEL", "gpt-4o-mini"), "model name")
 	systemFlag := flag.String("system", "You are Claw, a concise command-line coding assistant.", "system prompt")
 	maxStepsFlag := flag.Int("max-steps", 8, "max tool loop steps per turn")
+	memoryDirFlag := flag.String("memory-dir", envOrDefault("CLAW_MEMORY_DIR", defaultMemoryDir()), "memory workspace directory; set empty to disable")
 	flag.Parse()
+
+	var memoryStore *mem.Store
+	if strings.TrimSpace(*memoryDirFlag) != "" {
+		store, err := mem.New(*memoryDirFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "memory error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := store.Ensure(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "memory error: %v\n", err)
+			os.Exit(1)
+		}
+		memoryStore = store
+	}
+
+	tools := builtInTools()
+	if memoryStore != nil {
+		tools = append(tools, memoryStore.Tools()...)
+	}
 
 	a := &app{
 		provider: openai.New(openai.WithDefaultModel(*modelFlag)),
 		runner:   runner.New(),
 		thread:   harness.NewThread(),
-		tools:    builtInTools(),
+		tools:    tools,
+		memory:   memoryStore,
 		system:   *systemFlag,
 		model:    *modelFlag,
 		maxSteps: *maxStepsFlag,
@@ -54,7 +78,7 @@ func main() {
 
 func (a *app) run() {
 	fmt.Println("claw repl")
-	fmt.Println("commands: /help, /stop, /history, /tools, /quit")
+	fmt.Println("commands: /help, /stop, /history, /tools, /memory, /remember <text>, /new, /quit")
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -86,18 +110,37 @@ func (a *app) run() {
 }
 
 func (a *app) handleCommand(line string) (handled bool, quit bool) {
+	if strings.HasPrefix(line, "/remember ") {
+		text := strings.TrimSpace(strings.TrimPrefix(line, "/remember "))
+		a.remember(text)
+		return true, false
+	}
+
 	switch line {
 	case "/help":
 		fmt.Println("/help       show commands")
 		fmt.Println("/stop       cancel active run")
 		fmt.Println("/history    print thread messages")
 		fmt.Println("/tools      list available tools")
+		fmt.Println("/memory     print memory workspace")
+		fmt.Println("/remember   append text to today's memory")
+		fmt.Println("/new        capture current thread to memory and start a new one")
 		fmt.Println("/quit       exit")
 		return true, false
 	case "/tools":
 		for _, tool := range a.tools {
 			fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
 		}
+		return true, false
+	case "/memory":
+		if a.memory == nil {
+			fmt.Println("memory   │ disabled")
+			return true, false
+		}
+		fmt.Printf("memory   │ %s\n", a.memory.WorkspaceDir())
+		return true, false
+	case "/remember":
+		a.remember("")
 		return true, false
 	case "/history":
 		a.printHistory()
@@ -108,6 +151,9 @@ func (a *app) handleCommand(line string) (handled bool, quit bool) {
 		} else {
 			fmt.Println("assistant │ no active run")
 		}
+		return true, false
+	case "/new", "/reset":
+		a.newThread()
 		return true, false
 	case "/quit":
 		a.runner.Stop(a.thread.ID)
@@ -129,23 +175,25 @@ func (a *app) handlePrompt(text string) {
 	a.mu.Unlock()
 
 	done, err := a.runner.Start(context.Background(), a.thread.ID, func(ctx context.Context) error {
+		system, err := a.systemPrompt(ctx)
+		if err != nil {
+			return err
+		}
 		result, err := harness.Run(ctx, a.provider,
-			harness.WithSystem(a.system),
+			harness.WithSystem(system),
 			harness.WithMessages(messages...),
 			harness.WithTools(a.tools...),
 			harness.WithModel(a.model),
 			harness.WithMaxSteps(a.maxSteps),
 		)
-		if err != nil {
-			return err
+		if result != nil {
+			a.mu.Lock()
+			a.thread.Append(result)
+			a.mu.Unlock()
+
+			a.printResult(result)
 		}
-
-		a.mu.Lock()
-		a.thread.Append(result)
-		a.mu.Unlock()
-
-		a.printResult(result)
-		return nil
+		return err
 	})
 	if err != nil {
 		fmt.Printf("assistant │ error: %v\n", err)
@@ -162,6 +210,55 @@ func (a *app) handlePrompt(text string) {
 			fmt.Printf("assistant │ error: %v\n", err)
 		}
 	}()
+}
+
+func (a *app) systemPrompt(ctx context.Context) (string, error) {
+	if a.memory == nil {
+		return a.system, nil
+	}
+	return a.memory.Bootstrap(ctx, a.system)
+}
+
+func (a *app) remember(text string) {
+	if a.memory == nil {
+		fmt.Println("memory   │ disabled")
+		return
+	}
+	if strings.TrimSpace(text) == "" {
+		fmt.Println("memory   │ usage: /remember <text>")
+		return
+	}
+	path, err := a.memory.AppendDaily(context.Background(), "Manual", text)
+	if err != nil {
+		fmt.Printf("memory   │ error: %v\n", err)
+		return
+	}
+	fmt.Printf("memory   │ wrote %s\n", path)
+}
+
+func (a *app) newThread() {
+	if a.runner.IsRunning(a.thread.ID) {
+		fmt.Println("assistant │ run already active; use /stop first")
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.memory != nil && len(a.thread.Messages) > 0 {
+		path, err := a.memory.CaptureThread(context.Background(), a.thread, mem.CaptureOptions{
+			Title:              "Session Memory",
+			Slug:               "reset",
+			IncludeToolResults: false,
+		})
+		if err != nil {
+			fmt.Printf("memory   │ error: %v\n", err)
+			return
+		}
+		fmt.Printf("memory   │ captured %s\n", path)
+	}
+	a.thread = harness.NewThread()
+	fmt.Println("assistant │ new thread")
 }
 
 func (a *app) printHistory() {
@@ -274,4 +371,12 @@ func envOrDefault(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func defaultMemoryDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".agent-harness", "claw")
 }

@@ -17,14 +17,15 @@ const (
 	StopPaused                       // hook requested pause (e.g. for approval)
 	StopRefusal                      // provider refused the request
 	StopIncomplete                   // provider returned incomplete or token-limited output
+	StopError                        // run failed after producing a partial result
 )
 
 // Result contains everything produced by a single Run invocation.
 type Result struct {
 	// Messages contains all messages generated during this run,
 	// in order. Includes assistant messages and tool result messages.
-	// When StopReason is StopPaused, these are the messages completed
-	// before the pause — they do NOT include the pending tool calls.
+	// When StopReason is StopPaused, the assistant message contains the proposed
+	// calls but no tool result messages exist for the pending calls yet.
 	Messages []Message `json:"messages"`
 
 	// TotalUsage is the sum of all LLM calls made during this run.
@@ -70,6 +71,27 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 	activeTools := stableTools(cfg.tools)
 	toolMap := buildToolMap(activeTools)
 	result := &Result{}
+	fail := func(err error) (*Result, error) {
+		result.StopReason = StopError
+		return result, err
+	}
+	recordToolResult := func(step int, call ToolCall, toolResult *ToolResult) {
+		stored := cloneToolResult(toolResult)
+		stored.ToolCallID = call.ID
+		toolMsg := Message{Role: RoleTool, ToolResult: stored}
+		messages = append(messages, toolMsg)
+		result.Messages = append(result.Messages, toolMsg)
+		toolMsgEvent := toolMsg
+		emit(cfg, Event{Type: EventMessage, Step: step, Message: &toolMsgEvent})
+	}
+	recordUnexecuted := func(step int, calls []ToolCall, content string) {
+		for _, call := range calls {
+			recordToolResult(step, call, &ToolResult{
+				Content: content,
+				IsError: true,
+			})
+		}
+	}
 
 	for step := 0; step < cfg.maxSteps; step++ {
 		if ctx.Err() != nil {
@@ -85,7 +107,7 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 			activeTools = stableTools(cfg.tools)
 		}
 		if err := validateTools(activeTools); err != nil {
-			return nil, fmt.Errorf("step %d: invalid tool set: %w", step, err)
+			return fail(fmt.Errorf("step %d: invalid tool set: %w", step, err))
 		}
 		toolMap = buildToolMap(activeTools)
 
@@ -102,13 +124,17 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 				result.StopReason = StopCancelled
 				return result, nil
 			}
-			return nil, fmt.Errorf("step %d: %w", step, err)
+			return fail(fmt.Errorf("step %d: %w", step, err))
 		}
 		if chatResult == nil {
-			return nil, fmt.Errorf("step %d: provider returned nil result", step)
+			return fail(fmt.Errorf("step %d: provider returned nil result", step))
 		}
 
 		assistantMsg := chatResult.Message
+		finishReason, err := resolveFinishReason(chatResult.FinishReason, assistantMsg)
+		if err != nil {
+			return fail(fmt.Errorf("step %d: %w", step, err))
+		}
 		messages = append(messages, assistantMsg)
 		result.Messages = append(result.Messages, assistantMsg)
 		result.TotalUsage.Add(chatResult.Usage)
@@ -117,10 +143,6 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 			result.ResponseID = chatResult.ResponseID
 		}
 
-		finishReason, err := resolveFinishReason(chatResult.FinishReason, assistantMsg)
-		if err != nil {
-			return nil, fmt.Errorf("step %d: %w", step, err)
-		}
 		result.FinishReason = finishReason
 		result.FinishDetails = chatResult.FinishDetails
 
@@ -149,25 +171,26 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 			if cfg.beforeTool != nil {
 				action, err := cfg.beforeTool(ctx, call)
 				if err != nil {
-					return nil, err
+					recordUnexecuted(step, assistantMsg.ToolCalls[i:], "Tool call not executed because the before-tool hook failed.")
+					return fail(fmt.Errorf("before tool %q: %w", call.Name, err))
 				}
 				switch action {
+				case ToolActionContinue:
 				case ToolActionSkip:
 					toolResult := &ToolResult{
 						ToolCallID: call.ID,
 						Content:    "Tool call skipped.",
 						IsError:    true,
 					}
-					toolMsg := Message{Role: RoleTool, ToolResult: toolResult}
-					messages = append(messages, toolMsg)
-					result.Messages = append(result.Messages, toolMsg)
-					toolMsgEvent := toolMsg
-					emit(cfg, Event{Type: EventMessage, Step: step, Message: &toolMsgEvent})
+					recordToolResult(step, call, toolResult)
 					continue
 				case ToolActionPause:
 					result.StopReason = StopPaused
 					result.PendingToolCalls = append([]ToolCall(nil), assistantMsg.ToolCalls[i:]...)
 					return result, nil
+				default:
+					recordUnexecuted(step, assistantMsg.ToolCalls[i:], "Tool call not executed because the before-tool hook returned an invalid action.")
+					return fail(fmt.Errorf("before tool %q returned invalid action %d", call.Name, action))
 				}
 			}
 
@@ -176,6 +199,7 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 			toolResult, toolErr := executeTool(ctx, toolMap, call)
 			if toolErr != nil {
 				if errors.Is(toolErr, context.Canceled) || errors.Is(toolErr, context.DeadlineExceeded) {
+					recordUnexecuted(step, assistantMsg.ToolCalls[i:], "Tool execution cancelled.")
 					result.StopReason = StopCancelled
 					return result, nil
 				}
@@ -184,17 +208,16 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 
 			if cfg.afterTool != nil {
 				if err := cfg.afterTool(ctx, call, toolResult); err != nil {
-					return nil, err
+					emit(cfg, Event{Type: EventToolEnd, Step: step, ToolCall: &callEvent, Result: toolResult})
+					recordToolResult(step, call, toolResult)
+					recordUnexecuted(step, assistantMsg.ToolCalls[i+1:], "Tool call not executed because the after-tool hook failed.")
+					return fail(fmt.Errorf("after tool %q: %w", call.Name, err))
 				}
 			}
 
 			emit(cfg, Event{Type: EventToolEnd, Step: step, ToolCall: &callEvent, Result: toolResult})
 
-			toolMsg := Message{Role: RoleTool, ToolResult: toolResult}
-			messages = append(messages, toolMsg)
-			result.Messages = append(result.Messages, toolMsg)
-			toolMsgEvent := toolMsg
-			emit(cfg, Event{Type: EventMessage, Step: step, Message: &toolMsgEvent})
+			recordToolResult(step, call, toolResult)
 		}
 	}
 
@@ -290,8 +313,7 @@ func executeTool(ctx context.Context, toolMap map[string]Tool, call ToolCall) (*
 			IsError:    true,
 		}, errors.New("tool returned nil result")
 	}
-	if res.ToolCallID == "" {
-		res.ToolCallID = call.ID
-	}
-	return res, nil
+	stored := cloneToolResult(res)
+	stored.ToolCallID = call.ID
+	return stored, nil
 }

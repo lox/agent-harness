@@ -38,3 +38,12 @@ type ToolResult struct {
 	// Metadata is arbitrary structured data for the caller (not sent to LLM).
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
+
+func cloneToolResult(result *ToolResult) *ToolResult {
+	if result == nil {
+		return nil
+	}
+	cloned := *result
+	cloned.Metadata = copyMap(result.Metadata)
+	return &cloned
+}
