@@ -42,12 +42,28 @@ this field as opaque JSON. This keeps signed thinking, redacted content, server
 tool blocks, and continuation payloads intact without making them part of the
 harness model.
 
-`Usage.InputTokens` contains uncached input when the provider reports uncached
-and cached input separately; otherwise it contains the provider's primary input
-count. Populate cache fields independently from the provider response. The
-5-minute and 1-hour creation counters are subdivisions of
-`CacheCreationInputTokens`, and `CacheReadInputTokens` may be the source for the
-normalized `CachedInputTokens` value when a provider uses cache-read terminology.
+`Usage.InputTokens` contains ordinary, uncached input. When a provider reports
+an inclusive input total, the adapter subtracts cache reads and cache writes.
+`CachedInputTokens` is the normalized cache-read count and
+`CacheCreationInputTokens` is the normalized cache-write count. Provider cache
+detail remains available in `CacheReadInputTokens` and the 5-minute and 1-hour
+creation counters. The TTL counters subdivide `CacheCreationInputTokens`, and
+`CacheReadInputTokens` normally duplicates `CachedInputTokens`, so pricing code
+must not sum either pair.
+
+The loop copies each completed call's usage into `Result.CallUsage` before
+adding it to `Result.TotalUsage`. The slice stays in provider-call order and has
+the same length as `Result.Steps`; a zero entry records a call whose provider
+omitted usage. This lets callers apply per-response pricing rules, including
+long-context multipliers, before summing costs.
+
+Use `harness.WithReasoning(harness.ReasoningOptions{...})` for shared reasoning
+effort and mode controls. Adapters may keep string-keyed compatibility options,
+but the generic fields take precedence when both are present.
+
+Use `harness.WithPreviousResponseID(id)` to resume an existing provider response
+at the start of a run. The core supplies it only to the first provider call;
+subsequent stateful calls use response IDs captured during that run.
 
 ## Provider Packages
 
@@ -85,14 +101,23 @@ Constructor options:
 
 - `previous_response_id` -> explicit stateful continuation override
 - `prompt_cache_key` -> stable prompt-cache routing key
-- `reasoning_effort` -> reasoning effort, including `xhigh`
+- `reasoning_effort` -> compatibility alias for generic reasoning effort
+- `reasoning_mode` -> compatibility alias for generic reasoning mode
 - `max_output_tokens` (and the `max_tokens` compatibility alias) -> output limit
 - `temperature` and `top_p` -> sampling controls
 - `parallel_tool_calls` -> enable or disable parallel function calls
 - `response_format` -> `text` or `json_object` output formatting
 - `strict_tools` -> opt all function tools into OpenAI strict mode
 
-Unknown option keys are ignored safely without failing the run.
+Unknown option keys are ignored safely without failing the run. GPT-5.6 pro
+mode is configured provider-neutrally with
+`WithReasoning(ReasoningOptions{Mode: "pro", Effort: "..."})`; mode and effort
+are sent together and remain independent.
+
+The generic `ChatParams.PreviousResponseID` takes precedence over the
+`previous_response_id` compatibility key. Direct adapter callers may use either;
+loop callers should prefer `WithPreviousResponseID` so the external ID is sent
+only once.
 
 Function tool schemas are always passed through unchanged. Strict mode is
 disabled by default and only enabled when `strict_tools` is `true`; callers are
@@ -107,9 +132,12 @@ using that SDK escape hatch must update their import path.
 
 Both streaming and non-streaming calls return the terminal response ID, the
 same assembled assistant text and function calls, normalized finish reasons,
-and cached-input token usage. Function calls use the API's `call_id` as the
+and cache-aware token usage. OpenAI's inclusive input total is split into
+ordinary input, `cached_tokens` reads, and `cache_write_tokens` creation so each
+category can be priced directly. Function calls use the API's `call_id` as the
 harness `ToolCall.ID`, so generic `RoleTool` results map directly to
-`function_call_output` continuation items.
+`function_call_output` continuation items. Stateful continuations retain the
+same `prompt_cache_key` while adding `previous_response_id`.
 
 ## Anthropic Adapter
 
@@ -131,7 +159,8 @@ Constructor options:
 - `top_p`
 - `top_k`
 - `thinking_budget`
-- `reasoning_effort` or `output_effort` -> Anthropic output effort
+- `reasoning_effort` -> compatibility alias for generic reasoning effort
+- `output_effort` -> Anthropic-specific output-effort override
 - `prompt_cache` -> enable or disable ephemeral prompt caching (enabled by default)
 - `cache_ttl` -> `5m` (the default) or `1h`
 
@@ -143,7 +172,12 @@ Adapter-specific mapping considerations:
 - Fable is the default model; current Fable, Opus, and Sonnet model IDs can be selected per run.
 - Models that require an explicit adaptive-thinking request receive one automatically.
 - Signed thinking and continuation blocks are retained in `Message.ProviderData` and replayed unchanged on later tool-loop calls.
-- Response IDs, stop reasons, refusal details, and cache-aware usage are mapped to the shared result contract.
+- Ephemeral prompt caching remains enabled on every request by default, and
+  `cache_ttl` selects its 5-minute or 1-hour TTL without collapsing response
+  usage categories.
+- Response IDs, stop reasons, refusal details, uncached input, aggregate cache
+  creation, 5-minute creation, 1-hour creation, cache reads, and output usage
+  are mapped to the shared result contract.
 
 ## Testing Approach
 

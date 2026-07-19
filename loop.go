@@ -31,6 +31,11 @@ type Result struct {
 	// TotalUsage is the sum of all LLM calls made during this run.
 	TotalUsage Usage `json:"total_usage"`
 
+	// CallUsage retains one usage value per completed provider call, in call
+	// order. Its length equals Steps; a zero value means the provider omitted
+	// usage for that call.
+	CallUsage []Usage `json:"call_usage,omitempty"`
+
 	// Steps is the number of LLM calls made (1 = no tool calls).
 	Steps int `json:"steps"`
 
@@ -110,14 +115,20 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 			return fail(fmt.Errorf("step %d: invalid tool set: %w", step, err))
 		}
 		toolMap = buildToolMap(activeTools)
+		previousResponseID := ""
+		if step == 0 {
+			previousResponseID = cfg.previousResponseID
+		}
 
 		chatResult, err := provider.Chat(ctx, ChatParams{
-			Model:    cfg.model,
-			System:   cfg.system,
-			Messages: append([]Message(nil), messages...),
-			Tools:    toolDefs(activeTools),
-			Options:  copyMap(cfg.providerOpts),
-			OnDelta:  cfg.onDelta,
+			Model:              cfg.model,
+			System:             cfg.system,
+			Messages:           append([]Message(nil), messages...),
+			Tools:              toolDefs(activeTools),
+			PreviousResponseID: previousResponseID,
+			Reasoning:          cfg.reasoning,
+			Options:            copyMap(cfg.providerOpts),
+			OnDelta:            cfg.onDelta,
 		})
 		if err != nil {
 			if ctx.Err() != nil {
@@ -137,7 +148,12 @@ func Run(ctx context.Context, provider Provider, opts ...Option) (*Result, error
 		}
 		messages = append(messages, assistantMsg)
 		result.Messages = append(result.Messages, assistantMsg)
-		result.TotalUsage.Add(chatResult.Usage)
+		callUsage := Usage{}
+		if chatResult.Usage != nil {
+			callUsage = *chatResult.Usage
+			result.TotalUsage.Add(&callUsage)
+		}
+		result.CallUsage = append(result.CallUsage, callUsage)
 		result.Steps = step + 1
 		if chatResult.ResponseID != "" {
 			result.ResponseID = chatResult.ResponseID

@@ -10,12 +10,14 @@ import (
 type Option func(*options)
 
 type options struct {
-	system       string
-	messages     []Message
-	tools        []Tool
-	model        string
-	maxSteps     int
-	providerOpts map[string]any
+	system             string
+	messages           []Message
+	tools              []Tool
+	model              string
+	maxSteps           int
+	previousResponseID string
+	reasoning          ReasoningOptions
+	providerOpts       map[string]any
 
 	// Hooks
 	onEvent    func(Event)
@@ -104,6 +106,19 @@ func WithModel(model string) Option {
 // WithMaxSteps sets the maximum number of LLM turns.
 func WithMaxSteps(n int) Option {
 	return func(o *options) { o.maxSteps = n }
+}
+
+// WithPreviousResponseID continues an existing provider response on the first
+// call of the run. Later calls continue from response IDs produced by the run.
+func WithPreviousResponseID(id string) Option {
+	return func(o *options) { o.previousResponseID = id }
+}
+
+// WithReasoning sets provider-neutral reasoning controls. Providers map the
+// fields they support; generic values take precedence over compatibility keys
+// in WithProviderOptions.
+func WithReasoning(reasoning ReasoningOptions) Option {
+	return func(o *options) { o.reasoning = reasoning }
 }
 
 // WithProviderOptions sets provider-specific options.
