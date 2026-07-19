@@ -22,11 +22,12 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 
 ## Status
 
-- `v0.1.0` released: https://github.com/lox/agent-harness/releases/tag/v0.1.0
+- `v0.2.0` tagged: https://github.com/lox/agent-harness/tree/v0.2.0
 - Core harness loop, hooks, and thread state are implemented
 - Unit tests are in place for core loop behaviour and pause/resume
 - OpenAI Responses API adapter is implemented (`provider/openai`)
 - Anthropic provider adapter is implemented (`provider/anthropic`)
+- Optional file-backed memory, recall tools, capture, and promotion are implemented (`memory`)
 - `examples/claw` provides a REPL harness for manual testing
 
 ## What it doesn't do
@@ -46,7 +47,7 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - Pause/resume with explicit `PendingToolCalls` for approval workflows
 - Composes naturally with [ACP](https://agentclientprotocol.com/) and [MCP](https://modelcontextprotocol.io/)
 
-## Roadmap
+## Milestones
 
 - [x] Extract the reusable harness core (`Run`, messages, tools, provider interface)
 - [x] Add pause/resume support (`StopPaused`, `PendingToolCalls`, `Thread.ResolvePending`)
@@ -57,7 +58,10 @@ Implements the core agent loop: call the LLM → execute tool calls → feed res
 - [x] Implement `provider/openai` Responses adapter (stateful continuation + streaming)
 - [x] Implement `provider/anthropic` adapter (non-streaming + streaming)
 - [x] Add provider integration tests using local HTTP test servers
+- [x] Add provider-neutral finish states, continuation, and cache-aware usage
+- [x] Add optional file-backed memory and recoverable tool transcripts
 - [x] Cut `v0.1.0` once adapters + example + CI are complete
+- [x] Tag `v0.2.0` after provider parity, Responses migration, and memory hardening
 
 ## Documentation
 
