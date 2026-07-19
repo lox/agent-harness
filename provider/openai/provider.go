@@ -346,10 +346,14 @@ func convertResponse(response *responses.Response) (*harness.ChatResult, error) 
 			}
 		case "function_call":
 			call := item.AsFunctionCall()
+			arguments := call.Arguments
+			if arguments == "" {
+				arguments = `{}`
+			}
 			message.ToolCalls = append(message.ToolCalls, harness.ToolCall{
 				ID:        call.CallID,
 				Name:      call.Name,
-				Arguments: json.RawMessage(call.Arguments),
+				Arguments: json.RawMessage(arguments),
 			})
 		case "reasoning":
 			for _, summary := range item.AsReasoning().Summary {
