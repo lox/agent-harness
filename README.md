@@ -171,3 +171,7 @@ The example enables file-backed memory by default at `~/.agent-harness/claw`;
 pass `--memory-dir ""` to disable it.
 
 See [docs/architecture.md](docs/architecture.md) for the primary implementation guide.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
