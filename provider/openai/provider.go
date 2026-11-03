@@ -32,7 +32,8 @@ type config struct {
 }
 
 type providerData struct {
-	ResponseID string `json:"response_id"`
+	ResponseID string            `json:"response_id"`
+	Output     []json.RawMessage `json:"output,omitempty"`
 }
 
 // Option configures a Responses API provider.
@@ -208,6 +209,9 @@ func (p *Provider) buildRequest(params harness.ChatParams) (responses.ResponseNe
 	request := responses.ResponseNewParams{
 		Model: shared.ResponsesModel(model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
+		// Keep reasoning replayable even if a later request rebases the history
+		// instead of continuing this response's server-side context.
+		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
 	}
 	if instructions != "" {
 		request.Instructions = param.NewOpt(instructions)
@@ -298,6 +302,20 @@ func convertMessages(system string, messages []harness.Message) (responses.Respo
 		case harness.RoleUser:
 			input = append(input, responses.ResponseInputItemParamOfMessage(msg.Content, responses.EasyInputMessageRoleUser))
 		case harness.RoleAssistant:
+			if len(msg.ProviderData) > 0 {
+				var data providerData
+				if err := json.Unmarshal(msg.ProviderData, &data); err != nil {
+					return nil, "", fmt.Errorf("decode OpenAI provider data: %w", err)
+				}
+				if data.Output != nil {
+					for _, item := range data.Output {
+						input = append(input, param.Override[responses.ResponseInputItemUnionParam](item))
+					}
+					continue
+				}
+			}
+			// Messages created by callers or older adapter versions have no
+			// native output. Preserve their existing text/tool reconstruction.
 			if msg.Content != "" {
 				input = append(input, responses.ResponseInputItemParamOfMessage(msg.Content, responses.EasyInputMessageRoleAssistant))
 			}
@@ -354,7 +372,13 @@ func convertResponse(response *responses.Response) (*harness.ChatResult, error) 
 		return nil, fmt.Errorf("responses API returned unexpected status %q", response.Status)
 	}
 
-	providerData, err := json.Marshal(providerData{ResponseID: response.ID})
+	data := providerData{ResponseID: response.ID}
+	for _, item := range response.Output {
+		// Retain the wire representation, including reasoning, phase, item
+		// order, and fields not yet represented by the SDK's typed structs.
+		data.Output = append(data.Output, json.RawMessage(item.RawJSON()))
+	}
+	providerData, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("encode OpenAI provider data: %w", err)
 	}
