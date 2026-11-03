@@ -84,11 +84,11 @@ Target SDK: `github.com/openai/openai-go/v3`
 
 Package: `provider/openai`
 
-The OpenAI adapter uses the Responses API. It supports full input history and
-stores response IDs in the assistant message's opaque `ProviderData`. Later
-requests use the most recent ID as `previous_response_id` and send only the
-messages after that response. The package no longer sends Chat Completions API
-requests.
+The OpenAI adapter uses the Responses API. It stores response IDs and native
+output items in the assistant message's opaque `ProviderData`. By default,
+later requests use the most recent ID as `previous_response_id` and send only
+the messages after that response. Full-history replay is supported as described
+below. The package no longer sends Chat Completions API requests.
 
 Constructor options:
 
@@ -99,7 +99,8 @@ Constructor options:
 
 `ChatParams.Options` mappings:
 
-- `previous_response_id` -> explicit stateful continuation override
+- `previous_response_id` -> explicit stateful continuation override; `""` disables
+  automatic continuation and replays the supplied history
 - `prompt_cache_key` -> stable prompt-cache routing key
 - `reasoning_effort` -> compatibility alias for generic reasoning effort
 - `reasoning_mode` -> compatibility alias for generic reasoning mode
@@ -118,6 +119,55 @@ The generic `ChatParams.PreviousResponseID` takes precedence over the
 `previous_response_id` compatibility key. Direct adapter callers may use either;
 loop callers should prefer `WithPreviousResponseID` so the external ID is sent
 only once.
+
+### Full-history replay and local compaction
+
+After replacing or compacting a history prefix, explicitly reset continuation:
+
+```go
+result, err := provider.Chat(ctx, harness.ChatParams{
+    Messages: rebasedHistory,
+    Options: map[string]any{"previous_response_id": ""},
+})
+```
+
+Leave `ChatParams.PreviousResponseID` empty for this request. An empty typed
+field alone does **not** disable automatic continuation. For `harness.Run`, use
+`WithProviderOptions(map[string]any{"previous_response_id": ""})` and do not
+set `WithPreviousResponseID`; the option applies to every call in that run.
+
+The reset omits `previous_response_id` on the wire and sends the entire supplied
+history, including new summary messages. It does not delete server-side data or
+call OpenAI's compaction endpoint. Append the returned assistant message to the
+rebased history. Remove the empty-string option on subsequent calls to resume
+normal continuation from that **new** response, or keep it to replay full history
+on every call. Changing a history prefix without resetting continuation does not
+update the server's earlier context.
+
+Both streaming and non-streaming responses retain native output items in order,
+including reasoning `encrypted_content`, assistant `phase`, and function calls.
+Every request includes `reasoning.encrypted_content` so reasoning is available
+for a later reset, even when the original request used stored continuation.
+JSON-save and restore whole `Message` values, including `ProviderData`, without
+editing retained assistant messages. Native output takes precedence over the
+normalized `Content`, `Thinking`, and `ToolCalls` fields during replay; those
+fields are views for display and tool execution, not an editable native history.
+
+The caller owns compaction boundaries. Retain the active user message and all
+reasoning, assistant, function-call, and function-output items through the tool
+exchange unchanged; do not retain an orphan tool result. Keep native reasoning
+within a compatible model family. These constraints follow OpenAI's
+[reasoning/history and phase guidance](https://developers.openai.com/api/docs/guides/reasoning).
+OpenAI's [compaction guide](https://developers.openai.com/api/docs/guides/compaction)
+also distinguishes manual input-array history from `previous_response_id`
+chaining, where callers must not manually prune the server's context.
+
+Messages saved by older adapter versions contain only the response ID. They
+still support normal continuation and legacy text/tool reconstruction, but
+their discarded native reasoning cannot be recovered by this adapter. Do not
+treat replay of those old messages as lossless reasoning continuity.
+
+### Tools and response normalization
 
 Function tool schemas are always passed through unchanged. Strict mode is
 disabled by default and only enabled when `strict_tools` is `true`; callers are

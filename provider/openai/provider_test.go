@@ -105,7 +105,8 @@ func TestProviderRequestMapsHistoryToolsAndOptions(t *testing.T) {
 		Messages: []harness.Message{
 			{Role: harness.RoleSystem, Content: "history system"},
 			{Role: harness.RoleUser, Content: "hello"},
-			{Role: harness.RoleAssistant, Content: "checking", ToolCalls: []harness.ToolCall{{
+			// Older saved messages have an ID but no native output to replay.
+			{Role: harness.RoleAssistant, Content: "checking", ProviderData: json.RawMessage(`{"response_id":"resp_legacy"}`), ToolCalls: []harness.ToolCall{{
 				ID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{"q":"x"}`),
 			}}},
 			{Role: harness.RoleTool, ToolResult: &harness.ToolResult{ToolCallID: "call_1", Content: "found"}},
@@ -117,10 +118,11 @@ func TestProviderRequestMapsHistoryToolsAndOptions(t *testing.T) {
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"},"limit":{"type":"integer"}},"required":["q"]}`),
 		}},
 		Options: map[string]any{
-			"prompt_cache_key":  "analysis-session",
-			"reasoning_effort":  "xhigh",
-			"max_output_tokens": 8192,
-			"response_format":   "json_object",
+			"previous_response_id": "",
+			"prompt_cache_key":     "analysis-session",
+			"reasoning_effort":     "xhigh",
+			"max_output_tokens":    8192,
+			"response_format":      "json_object",
 		},
 	})
 	if err != nil {
@@ -254,6 +256,113 @@ func TestExplicitPreviousResponseIDUsesMatchingHistorySuffix(t *testing.T) {
 	input := body["input"].([]any)
 	if len(input) != 1 || input[0].(map[string]any)["type"] != "function_call_output" {
 		t.Fatalf("continuation input = %#v", input)
+	}
+}
+
+func TestProviderRebasesSerializedHistoryWithNativeOutput(t *testing.T) {
+	const output = `[
+		{"type":"reasoning","id":"rs_original","summary":[{"type":"summary_text","text":"inspect first"}],"encrypted_content":"opaque_reasoning_fixture"},
+		{"type":"message","id":"msg_original","status":"completed","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Looking now","annotations":[]}]},
+		{"type":"function_call","id":"fc_original","status":"completed","call_id":"call_original","name":"observe","arguments":"{}"}
+	]`
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
+			var requests []map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				requests = append(requests, body)
+				response := completedTextResponse("resp_rebased", "done", 1, 0, 1)
+				if len(requests) == 1 {
+					response = `{"id":"resp_original","object":"response","status":"completed","output":` + output + `}`
+				}
+				if body["stream"] == true {
+					w.Header().Set("Content-Type", "text/event-stream")
+					writeSSE(t, w, "response.completed", `{"type":"response.completed","sequence_number":1,"response":`+compactJSON(t, response)+`}`)
+				} else {
+					writeJSON(t, w, response)
+				}
+			}))
+			defer server.Close()
+
+			p := New(WithBaseURL(server.URL), WithAPIKey("fixture-only"))
+			params := harness.ChatParams{Messages: []harness.Message{{Role: harness.RoleUser, Content: "inspect project"}}}
+			if streaming {
+				params.OnDelta = func(harness.Delta) {}
+			}
+			first, err := p.Chat(context.Background(), params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(requests[0]["include"], []any{"reasoning.encrypted_content"}) {
+				t.Errorf("first request must request replayable reasoning: %#v", requests[0]["include"])
+			}
+			if first.Message.Thinking != "inspect first" || first.Message.Content != "Looking now" || len(first.Message.ToolCalls) != 1 {
+				t.Fatalf("normalized message = %+v", first.Message)
+			}
+
+			// Compact only the older prefix, retaining the active user/tool exchange.
+			history := []harness.Message{
+				{Role: harness.RoleUser, Content: "COMPACTED_WORKING_NOTES"},
+				params.Messages[0], first.Message,
+				{Role: harness.RoleTool, ToolResult: &harness.ToolResult{ToolCallID: "call_original", Content: "observed"}},
+				{Role: harness.RoleUser, Content: "fresh observation"},
+			}
+			saved, err := json.Marshal(history)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(saved, &params.Messages); err != nil {
+				t.Fatal(err)
+			}
+			// Default continuation remains a suffix-only request, even after restore.
+			if _, err := p.Chat(context.Background(), params); err != nil {
+				t.Fatal(err)
+			}
+			wantSuffix := []any{
+				map[string]any{"type": "function_call_output", "call_id": "call_original", "output": "observed"},
+				map[string]any{"role": "user", "content": "fresh observation"},
+			}
+			if requests[1]["previous_response_id"] != "resp_original" || !reflect.DeepEqual(requests[1]["input"], wantSuffix) {
+				t.Fatalf("default continuation = %#v", requests[1])
+			}
+
+			params.Options = map[string]any{"previous_response_id": ""}
+			rebased, err := p.Chat(context.Background(), params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, anchored := requests[2]["previous_response_id"]; anchored {
+				t.Fatalf("rebased request still anchored: %#v", requests[2])
+			}
+			var native []any
+			if err := json.Unmarshal([]byte(output), &native); err != nil {
+				t.Fatal(err)
+			}
+			want := []any{
+				map[string]any{"role": "user", "content": "COMPACTED_WORKING_NOTES"},
+				map[string]any{"role": "user", "content": "inspect project"},
+			}
+			want = append(want, native...)
+			want = append(want, wantSuffix...)
+			if !reflect.DeepEqual(requests[2]["input"], want) {
+				t.Errorf("rebased input lost or duplicated native history:\ngot:  %#v\nwant: %#v", requests[2]["input"], want)
+			}
+
+			// Removing the reset resumes continuation from the NEW server context.
+			params.Options = nil
+			params.Messages = append(params.Messages, rebased.Message, harness.Message{Role: harness.RoleUser, Content: "next"})
+			if _, err := p.Chat(context.Background(), params); err != nil {
+				t.Fatal(err)
+			}
+			if requests[3]["previous_response_id"] != "resp_rebased" || !reflect.DeepEqual(requests[3]["input"], []any{map[string]any{"role": "user", "content": "next"}}) {
+				t.Fatalf("continuation after rebase = %#v", requests[3])
+			}
+		})
 	}
 }
 
